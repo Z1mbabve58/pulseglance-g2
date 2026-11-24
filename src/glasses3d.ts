@@ -46,32 +46,38 @@ export class Glasses3DViewer {
   private controls: OrbitControls
   private glassesGroup: THREE.Group
   private sensorMat: THREE.MeshStandardMaterial
+  private hudMat: THREE.MeshBasicMaterial
   private lensCanvas: HTMLCanvasElement
   private lensTex: THREE.CanvasTexture
   private badgeEl: HTMLDivElement
   private viewBtn: HTMLButtonElement
   private povMode = false
+  private cameraAnimating = false
+  private desiredCamPos = new THREE.Vector3(1.85, 0.55, 5.1)
+  private desiredTarget = new THREE.Vector3(0, 0, -0.5)
   private flashUntil = 0
   private isRecording = false
+  private hoveringTemple = false
   private lastText = ''
   private raycaster = new THREE.Raycaster()
   private pointer = new THREE.Vector2()
   private templeTargets: THREE.Object3D[] = []
   private holdTimer: number | null = null
   private holdFired = false
+  private camWorldDir = new THREE.Vector3()
 
   constructor(callbacks: GlassesCallbacks) {
     this.domElement = document.createElement('div')
     this.domElement.style.cssText =
-      'position:relative;width:100%;height:270px;border-radius:14px;overflow:hidden;border:1px solid #1d4d35;background:radial-gradient(circle at 50% 42%,#0d261a 0%,#030906 85%);cursor:grab;'
+      'position:relative;width:100%;height:275px;border-radius:14px;overflow:hidden;border:1px solid #1d4d35;background:radial-gradient(circle at 50% 42%,#0d261a 0%,#030906 85%);cursor:grab;'
 
     this.scene = new THREE.Scene()
-    this.camera = new THREE.PerspectiveCamera(34, 580 / 270, 0.1, 50)
-    this.camera.position.set(1.45, 0.55, 5.4)
+    this.camera = new THREE.PerspectiveCamera(34, 580 / 275, 0.1, 50)
+    this.camera.position.copy(this.desiredCamPos)
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
-    this.renderer.setSize(580, 270)
+    this.renderer.setSize(580, 275)
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping
     this.renderer.toneMappingExposure = 1.2
     this.renderer.domElement.style.cssText = 'width:100%;height:100%;display:block;'
@@ -81,9 +87,14 @@ export class Glasses3DViewer {
     this.controls.enableDamping = true
     this.controls.dampingFactor = 0.07
     this.controls.enablePan = false
-    this.controls.minDistance = 1.35
+    this.controls.enableZoom = true
+    this.controls.zoomSpeed = 0.85
+    this.controls.minDistance = 1.15
     this.controls.maxDistance = 8.5
-    this.controls.target.set(0, 0, -0.4)
+    this.controls.target.copy(this.desiredTarget)
+    this.controls.addEventListener('start', () => {
+      this.cameraAnimating = false
+    })
 
     this.scene.add(new THREE.AmbientLight(0xd1fae5, 0.9))
     const keyLight = new THREE.DirectionalLight(0xffffff, 2.2)
@@ -107,6 +118,15 @@ export class Glasses3DViewer {
       emissiveIntensity: 0.25,
     })
 
+    this.hudMat = new THREE.MeshBasicMaterial({
+      map: this.lensTex,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.FrontSide,
+    })
+
     this.glassesGroup = new THREE.Group()
     this.buildFrame()
     this.scene.add(this.glassesGroup)
@@ -114,7 +134,7 @@ export class Glasses3DViewer {
     this.badgeEl = document.createElement('div')
     this.badgeEl.style.cssText =
       'position:absolute;top:10px;left:12px;padding:4px 10px;border-radius:999px;background:rgba(6,20,13,0.85);border:1px solid #24573e;color:#6ee7b7;font-size:10px;font-weight:700;letter-spacing:0.6px;pointer-events:none;transition:all 0.15s;'
-    this.badgeEl.textContent = 'EVEN G2 3D • CLICK/HOLD TEMPLE'
+    this.badgeEl.textContent = 'FRONT VIEW • ORBIT BEHIND LENSES TO SEE HUD'
     this.domElement.appendChild(this.badgeEl)
 
     this.viewBtn = document.createElement('button')
@@ -129,8 +149,8 @@ export class Glasses3DViewer {
 
     const hintEl = document.createElement('div')
     hintEl.style.cssText =
-      'position:absolute;bottom:8px;left:12px;right:12px;display:flex;justify-content:space-between;font-size:9.5px;color:#6ee7b7;opacity:0.65;pointer-events:none;'
-    hintEl.innerHTML = '<span>Drag to rotate • Click/Hold temple sensor</span><span>Waveguide 576×288</span>'
+      'position:absolute;bottom:8px;left:12px;right:12px;display:flex;justify-content:space-between;font-size:9.5px;color:#6ee7b7;opacity:0.7;pointer-events:none;'
+    hintEl.innerHTML = '<span>Drag: Orbit behind glasses • Wheel: Zoom • Temple Wheel: Scroll chats</span><span>Directional Waveguide</span>'
     this.domElement.appendChild(hintEl)
 
     this.bindInteractions(callbacks)
@@ -150,19 +170,11 @@ export class Glasses3DViewer {
       roughness: 0.55,
     })
     const lensGlassMat = new THREE.MeshPhysicalMaterial({
-      color: 0x0a1f16,
+      color: 0x0b2218,
       transparent: true,
-      opacity: 0.42,
-      roughness: 0.1,
-      metalness: 0.05,
-      side: THREE.DoubleSide,
-    })
-    const hudMat = new THREE.MeshBasicMaterial({
-      map: this.lensTex,
-      transparent: true,
-      opacity: 0.96,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
+      opacity: 0.48,
+      roughness: 0.08,
+      metalness: 0.12,
       side: THREE.DoubleSide,
     })
 
@@ -191,13 +203,11 @@ export class Glasses3DViewer {
       glass.position.set(xOff, 0, 0)
       this.glassesGroup.add(glass)
 
-      const hud = new THREE.Mesh(lensGeo, hudMat)
-      hud.position.set(xOff, 0, 0.012)
-      this.glassesGroup.add(hud)
-
-      const hudBack = new THREE.Mesh(lensGeo, hudMat)
-      hudBack.position.set(xOff, 0, -0.012)
-      this.glassesGroup.add(hudBack)
+      // Single-sided inner waveguide layer facing -Z (wearer's eyes only)
+      const hudInner = new THREE.Mesh(lensGeo, this.hudMat)
+      hudInner.position.set(xOff, 0, -0.016)
+      hudInner.rotation.y = Math.PI
+      this.glassesGroup.add(hudInner)
 
       const hinge = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.17, 0.2), this.sensorMat)
       hinge.position.set(side * 2.58, 0.34, -0.05)
@@ -221,18 +231,27 @@ export class Glasses3DViewer {
     this.glassesGroup.add(bridge)
   }
 
+  private hitTemple(e: PointerEvent | WheelEvent): boolean {
+    const rect = this.renderer.domElement.getBoundingClientRect()
+    this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1
+    this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1
+    this.raycaster.setFromCamera(this.pointer, this.camera)
+    return this.raycaster.intersectObjects(this.templeTargets, false).length > 0
+  }
+
   private bindInteractions(callbacks: GlassesCallbacks): void {
     const el = this.renderer.domElement
-    const hitTemple = (e: PointerEvent): boolean => {
-      const rect = el.getBoundingClientRect()
-      this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1
-      this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1
-      this.raycaster.setFromCamera(this.pointer, this.camera)
-      return this.raycaster.intersectObjects(this.templeTargets, false).length > 0
-    }
+
+    el.addEventListener('pointermove', (e) => {
+      const over = this.hitTemple(e)
+      if (over !== this.hoveringTemple) {
+        this.hoveringTemple = over
+        el.style.cursor = over ? 'pointer' : 'grab'
+      }
+    })
 
     el.addEventListener('pointerdown', (e) => {
-      if (!hitTemple(e)) return
+      if (!this.hitTemple(e)) return
       this.holdFired = false
       this.holdTimer = window.setTimeout(() => {
         this.holdFired = true
@@ -246,21 +265,24 @@ export class Glasses3DViewer {
         clearTimeout(this.holdTimer)
         this.holdTimer = null
       }
-      if (!this.holdFired && hitTemple(e)) {
+      if (!this.holdFired && this.hitTemple(e)) {
         this.triggerGesture('TAP')
         callbacks.onTap()
       }
     })
 
+    // Capture phase: wheel on temple scrolls chats without zooming; wheel elsewhere only zooms camera
     el.addEventListener(
       'wheel',
       (e) => {
+        if (!this.hitTemple(e)) return
         if (Math.abs(e.deltaY) < 4) return
         e.preventDefault()
+        e.stopImmediatePropagation()
         this.triggerGesture('SCROLL')
         callbacks.onScroll(e.deltaY > 0 ? 1 : -1)
       },
-      { passive: false }
+      { passive: false, capture: true }
     )
   }
 
@@ -268,12 +290,13 @@ export class Glasses3DViewer {
     this.povMode = !this.povMode
     this.viewBtn.textContent = this.povMode ? '🕶 3D Frame [V]' : '👁 POV Lens [V]'
     if (this.povMode) {
-      this.controls.target.set(1.38, 0.02, 0)
-      this.camera.position.set(1.38, 0.02, 2.35)
+      this.desiredTarget.set(-1.38, 0.02, 0.4)
+      this.desiredCamPos.set(-1.38, 0.02, -2.18)
     } else {
-      this.controls.target.set(0, 0, -0.4)
-      this.camera.position.set(1.45, 0.55, 5.4)
+      this.desiredTarget.set(0, 0, -0.5)
+      this.desiredCamPos.set(1.85, 0.55, 5.1)
     }
+    this.cameraAnimating = true
   }
 
   public triggerGesture(kind: GestureKind): void {
@@ -297,10 +320,10 @@ export class Glasses3DViewer {
     if (!ctx) return
     ctx.clearRect(0, 0, 576, 288)
 
-    ctx.fillStyle = recording ? 'rgba(42, 8, 8, 0.72)' : 'rgba(3, 22, 13, 0.68)'
+    ctx.fillStyle = recording ? 'rgba(42, 8, 8, 0.78)' : 'rgba(3, 22, 13, 0.74)'
     ctx.fillRect(0, 0, 576, 288)
 
-    ctx.strokeStyle = recording ? 'rgba(248, 113, 113, 0.65)' : 'rgba(74, 222, 128, 0.55)'
+    ctx.strokeStyle = recording ? 'rgba(248, 113, 113, 0.7)' : 'rgba(74, 222, 128, 0.6)'
     ctx.lineWidth = 3
     ctx.strokeRect(14, 14, 548, 260)
 
@@ -322,24 +345,54 @@ export class Glasses3DViewer {
     const now = performance.now()
     const flashing = now < this.flashUntil
 
+    if (this.cameraAnimating) {
+      this.camera.position.lerp(this.desiredCamPos, 0.1)
+      this.controls.target.lerp(this.desiredTarget, 0.1)
+      if (this.camera.position.distanceTo(this.desiredCamPos) < 0.015) {
+        this.camera.position.copy(this.desiredCamPos)
+        this.controls.target.copy(this.desiredTarget)
+        this.cameraAnimating = false
+      }
+    }
+
+    // Directional waveguide optical fade: visible only when viewing from behind the lenses (-Z)
+    this.camera.getWorldDirection(this.camWorldDir)
+    const behindAlignment = this.camWorldDir.z
+    const waveguideAlpha = THREE.MathUtils.smoothstep(behindAlignment, 0.08, 0.55)
+    this.hudMat.opacity = waveguideAlpha * 0.97
+
     if (this.isRecording) {
       this.sensorMat.emissive.setHex(0xef4444)
       this.sensorMat.emissiveIntensity = 1.2 + Math.sin(now * 0.012) * 0.5
     } else if (flashing) {
       this.sensorMat.emissive.setHex(0x34d399)
       this.sensorMat.emissiveIntensity = 1.6
+    } else if (this.hoveringTemple) {
+      this.sensorMat.emissive.setHex(0x34d399)
+      this.sensorMat.emissiveIntensity = 0.7
     } else {
       this.sensorMat.emissive.setHex(0x10b981)
       this.sensorMat.emissiveIntensity = 0.25
-      if (this.badgeEl.textContent?.startsWith('⚡') || this.badgeEl.textContent?.startsWith('↕')) {
-        this.badgeEl.textContent = 'EVEN G2 3D • CLICK/HOLD TEMPLE'
+    }
+
+    if (!flashing && !this.isRecording) {
+      if (this.hoveringTemple) {
+        this.badgeEl.textContent = 'TEMPLE SENSOR • TAP / SCROLL / HOLD'
+        this.badgeEl.style.borderColor = '#34d399'
+        this.badgeEl.style.color = '#ecfdf5'
+      } else if (waveguideAlpha > 0.35) {
+        this.badgeEl.textContent = 'WEARER POV • WAVEGUIDE HUD ACTIVE'
+        this.badgeEl.style.borderColor = '#2e6f4e'
+        this.badgeEl.style.color = '#4ade80'
+      } else {
+        this.badgeEl.textContent = 'FRONT VIEW • ORBIT BEHIND LENSES TO SEE HUD'
         this.badgeEl.style.borderColor = '#24573e'
         this.badgeEl.style.color = '#6ee7b7'
       }
     }
 
-    if (!this.povMode) {
-      this.glassesGroup.position.y = Math.sin(now * 0.0016) * 0.035
+    if (!this.povMode && !this.cameraAnimating) {
+      this.glassesGroup.position.y = Math.sin(now * 0.0016) * 0.03
     } else {
       this.glassesGroup.position.y = 0
     }
