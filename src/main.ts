@@ -57,6 +57,7 @@ let replyIdx = 0
 let mediaIdx = 0
 let msgScrollEnd = 0
 let lightboxUrl = ''
+let pinnedLensUrl = ''
 let statusNote = ''
 let sendingLabel = ''
 let pcmChunks: Uint8Array[] = []
@@ -89,10 +90,12 @@ function getActiveCard(): ChatCard | undefined {
 
 function getChatAttachments(card?: ChatCard): AttachmentItem[] {
   if (!card?.messages) return []
-  const items: AttachmentItem[] = []
-  for (const m of card.messages) {
+  const images: AttachmentItem[] = []
+  const links: AttachmentItem[] = []
+  for (let i = card.messages.length - 1; i >= 0; i--) {
+    const m = card.messages[i]
     if (m.hasImage && m.id) {
-      items.push({
+      images.push({
         type: 'IMAGE',
         label: `📷 Photo from ${m.sender}`,
         url: `${BACKEND_URL}/api/media/${encodeURIComponent(card.id)}/${m.id}`,
@@ -101,7 +104,7 @@ function getChatAttachments(card?: ChatCard): AttachmentItem[] {
     }
     for (const u of m.urls || []) {
       const cleanHost = u.replace(/^https?:\/\/(www\.)?/, '').slice(0, 34)
-      items.push({
+      links.push({
         type: 'LINK',
         label: `🔗 ${cleanHost}`,
         url: u,
@@ -109,11 +112,12 @@ function getChatAttachments(card?: ChatCard): AttachmentItem[] {
       })
     }
   }
-  return items
+  return [...images, ...links]
 }
 
 function resetChatCursor(): void {
   replyIdx = 0
+  pinnedLensUrl = ''
   mediaIdx = 0
   msgScrollEnd = (getActiveCard()?.messages || []).length
 }
@@ -263,6 +267,16 @@ function ensureGlasses3D(): Glasses3DViewer {
   return glasses3d
 }
 
+function getHudImage(): { url: string; full: boolean } {
+  if (pinnedLensUrl) return { url: pinnedLensUrl, full: true }
+  if (lightboxUrl) return { url: lightboxUrl, full: true }
+  const card = getActiveCard(); if (!card) return { url: '', full: false }
+  if (mode === 'MEDIA') { const a = getChatAttachments(card)[mediaIdx]; return a?.type === 'IMAGE' ? { url: a.url, full: true } : { url: '', full: false } }
+  const src = mode === 'HISTORY' ? getHistoryWindow(card).slice : (card.messages || [])
+  for (let i = src.length - 1; i >= 0; i--) if (src[i]?.hasImage && src[i].id) return { url: `${BACKEND_URL}/api/media/${encodeURIComponent(card.id)}/${src[i].id}`, full: false }
+  return { url: '', full: false }
+}
+
 function renderCompanion(): void {
   const root = document.getElementById('app')
   if (!root) return
@@ -289,7 +303,7 @@ function renderCompanion(): void {
             ${inHud ? '<span style="opacity:0.8;">ON HUD</span>' : ''}
           </div>
           <div>${linkifyEscaped(m.text)}</div>
-          ${imgUrl ? `<div style="margin-top:6px;"><img data-lightbox="${esc(imgUrl)}" class="chat-thumb" src="${esc(imgUrl)}" alt="Photo" style="max-width:100%;max-height:150px;border-radius:8px;border:1px solid #2a5c43;cursor:zoom-in;display:block;" /></div>` : ''}
+          ${imgUrl ? `<div style="margin-top:6px;"><img crossorigin="anonymous" data-lightbox="${esc(imgUrl)}" class="chat-thumb" src="${esc(imgUrl)}" alt="Photo" style="max-width:100%;max-height:150px;border-radius:8px;border:1px solid #2a5c43;cursor:zoom-in;display:block;" /><button data-lens-url="${esc(imgUrl)}" class="btn-lens-pin" style="margin-top:5px;padding:3px 9px;border-radius:6px;border:1px solid #34d399;background:${pinnedLensUrl === imgUrl ? '#10b981' : '#0f291c'};color:${pinnedLensUrl === imgUrl ? '#03150d' : '#6ee7b7'};font-family:inherit;font-size:10.5px;font-weight:700;cursor:pointer;">${pinnedLensUrl === imgUrl ? '✓ Showing on Lens (Hide)' : '👓 Project on G2 Lens'}</button></div>` : ''}
           ${linkPills ? `<div>${linkPills}</div>` : ''}
         </div>`
       }).join('')
@@ -371,7 +385,7 @@ function renderCompanion(): void {
 
   const mount3d = document.getElementById('g2-3d-mount')
   const viewer = ensureGlasses3D()
-  viewer.updateScreen(buildScreenText(), mode === 'RECORDING')
+  const hi = getHudImage(); viewer.updateScreen(buildScreenText(), mode === 'RECORDING', hi.url, hi.full)
   if (mount3d && viewer.domElement.parentElement !== mount3d) {
     mount3d.appendChild(viewer.domElement)
   }
@@ -383,6 +397,7 @@ function renderCompanion(): void {
   document.getElementById('btn-close-lightbox')?.addEventListener('click', () => { lightboxUrl = ''; renderCompanion() })
   document.getElementById('lightbox-overlay')?.addEventListener('click', (e) => { if ((e.target as HTMLElement).id === 'lightbox-overlay') { lightboxUrl = ''; renderCompanion() } })
   document.querySelectorAll('.chat-thumb').forEach((el) => el.addEventListener('click', () => { lightboxUrl = (el as HTMLElement).dataset.lightbox || ''; renderCompanion() }))
+  document.querySelectorAll('.btn-lens-pin').forEach((el) => el.addEventListener('click', (e) => { e.stopPropagation(); const u = (el as HTMLElement).dataset.lensUrl || ''; pinnedLensUrl = pinnedLensUrl === u ? '' : u; renderCompanion() }))
   document.getElementById('tab-dms')?.addEventListener('click', () => { activeTab = 'DMS'; chatIdx = 0; resetChatCursor(); if (mode !== 'RECORDING') mode = 'FEED'; void render() })
   document.getElementById('tab-groups')?.addEventListener('click', () => { activeTab = 'GROUPS'; chatIdx = 0; resetChatCursor(); if (mode !== 'RECORDING') mode = 'FEED'; void render() })
   document.getElementById('btn-prev')?.addEventListener('click', () => { if (!list.length) return; chatIdx = (chatIdx - 1 + list.length) % list.length; resetChatCursor(); if (mode !== 'RECORDING') mode = 'FEED'; void render() })

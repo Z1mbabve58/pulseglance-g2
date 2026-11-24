@@ -142,6 +142,10 @@ export class Glasses3DViewer {
   private isRecording = false
   private hoveringTemple = false
   private lastText = ''
+  private lastImageUrl = ''
+  private lastFullImage = false
+  private imgCache = new Map<string, HTMLImageElement>()
+  private imgLoading = new Set<string>()
   private raycaster = new THREE.Raycaster()
   private pointer = new THREE.Vector2()
   private templeTargets: THREE.Object3D[] = []
@@ -644,7 +648,7 @@ export class Glasses3DViewer {
     for (const h of this.hotspotEls) h.el.style.borderColor = t.css
     const prev = this.lastText
     this.lastText = ''
-    this.updateScreen(prev, this.isRecording)
+    this.updateScreen(prev, this.isRecording, this.lastImageUrl, this.lastFullImage)
   }
 
   public toggleView(): void {
@@ -681,75 +685,192 @@ export class Glasses3DViewer {
     this.badgeEl.style.color = kind === 'HOLD' ? '#fca5a5' : '#ecfdf5'
   }
 
-  public updateScreen(text: string, recording: boolean): void {
-    if (text === this.lastText && recording === this.isRecording) return
+  public updateScreen(text: string, recording: boolean, imageUrl = '', fullImage = false): void {
+    if (
+      text === this.lastText &&
+      recording === this.isRecording &&
+      imageUrl === this.lastImageUrl &&
+      fullImage === this.lastFullImage
+    ) {
+      return
+    }
     this.lastText = text
     this.isRecording = recording
+    this.lastImageUrl = imageUrl
+    this.lastFullImage = fullImage
+
+    if (imageUrl && !this.imgCache.has(imageUrl) && !this.imgLoading.has(imageUrl)) {
+      this.imgLoading.add(imageUrl)
+      const fetchUrl = `${imageUrl}${imageUrl.includes('?') ? '&' : '?'}hud=1`
+      fetch(fetchUrl, { mode: 'cors' })
+        .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(`HTTP ${r.status}`))))
+        .then((blob) => {
+          const objUrl = URL.createObjectURL(blob)
+          const img = new Image()
+          img.onload = () => {
+            URL.revokeObjectURL(objUrl)
+            this.imgLoading.delete(imageUrl)
+            this.imgCache.set(imageUrl, img)
+            if (this.lastImageUrl === imageUrl) this.redrawHud()
+          }
+          img.onerror = () => {
+            URL.revokeObjectURL(objUrl)
+            this.imgLoading.delete(imageUrl)
+          }
+          img.src = objUrl
+        })
+        .catch((err) => {
+          this.imgLoading.delete(imageUrl)
+          console.warn('[HUD Image Fetch Error]', err)
+        })
+    }
+
+    this.redrawHud()
+  }
+
+  private drawOpticalPhoto(
+    ctx: CanvasRenderingContext2D,
+    img: HTMLImageElement,
+    boxX: number,
+    boxY: number,
+    boxW: number,
+    boxH: number,
+    fg: string
+  ): void {
+    if (!img.naturalWidth || !img.naturalHeight) return
+    const scale = Math.min(boxW / img.naturalWidth, boxH / img.naturalHeight)
+    const dw = Math.max(1, Math.round(img.naturalWidth * scale))
+    const dh = Math.max(1, Math.round(img.naturalHeight * scale))
+    const dx = Math.round(boxX + (boxW - dw) / 2)
+    const dy = Math.round(boxY + (boxH - dh) / 2)
+
+    const off = document.createElement('canvas')
+    off.width = dw
+    off.height = dh
+    const octx = off.getContext('2d')
+    if (!octx) return
+
+    octx.fillStyle = '#000'
+    octx.fillRect(0, 0, dw, dh)
+    octx.filter = 'grayscale(100%) contrast(1.25) brightness(1.34)'
+    octx.drawImage(img, 0, 0, dw, dh)
+    octx.filter = 'none'
+    octx.globalCompositeOperation = 'multiply'
+    octx.fillStyle = fg
+    octx.fillRect(0, 0, dw, dh)
+
+    ctx.save()
+    ctx.shadowBlur = 0
+    ctx.globalAlpha = 0.96
+    ctx.drawImage(off, dx, dy, dw, dh)
+
+    const c = 14
+    ctx.strokeStyle = fg
+    ctx.globalAlpha = 0.6
+    ctx.lineWidth = 2
+    ctx.beginPath()
+    ctx.moveTo(dx, dy + c); ctx.lineTo(dx, dy); ctx.lineTo(dx + c, dy)
+    ctx.moveTo(dx + dw - c, dy); ctx.lineTo(dx + dw, dy); ctx.lineTo(dx + dw, dy + c)
+    ctx.moveTo(dx, dy + dh - c); ctx.lineTo(dx, dy + dh); ctx.lineTo(dx + c, dy + dh)
+    ctx.moveTo(dx + dw - c, dy + dh); ctx.lineTo(dx + dw, dy + dh); ctx.lineTo(dx + dw, dy + dh - c)
+    ctx.stroke()
+    ctx.restore()
+  }
+
+  private redrawHud(): void {
     const ctx = this.lensCanvas.getContext('2d')
     if (!ctx) return
 
     const W = 1024
     const H = 512
     const theme = HUD_THEMES[this.themeIdx]
-    const fg = recording ? '#fca5a5' : theme.css
-    const glow = recording ? '#ef4444' : theme.glow
+    const fg = this.isRecording ? '#fca5a5' : theme.css
+    const glow = this.isRecording ? '#ef4444' : theme.glow
     const ff = '-apple-system,BlinkMacSystemFont,"SF Pro Display","Inter","Segoe UI",sans-serif'
 
     ctx.clearRect(0, 0, W, H)
 
-    const rad = ctx.createRadialGradient(W * 0.5, H * 0.48, 30, W * 0.5, H * 0.48, 420)
-    rad.addColorStop(0, recording ? 'rgba(239,68,68,0.11)' : 'rgba(74,222,128,0.06)')
+    const rad = ctx.createRadialGradient(W * 0.5, H * 0.48, 30, W * 0.5, H * 0.48, 410)
+    rad.addColorStop(0, this.isRecording ? 'rgba(239,68,68,0.10)' : 'rgba(74,222,128,0.05)')
     rad.addColorStop(1, 'rgba(0,0,0,0)')
     ctx.fillStyle = rad
     ctx.fillRect(0, 0, W, H)
 
-    const raw = text.split('\n').map((l) => l.trim()).filter(Boolean)
+    const raw = this.lastText.split('\n').map((l) => l.trim()).filter(Boolean)
     const header = raw[0] || 'PULSEGLANCE G2'
     const footer = raw.length > 1 && raw[raw.length - 1].startsWith('[') ? raw[raw.length - 1] : ''
     const bodyRaw = raw.slice(1, footer ? -1 : undefined)
-    const sx = 115
+
+    const sx = 128
     const sw = W - sx * 2
+    const loadedImg = this.lastImageUrl ? this.imgCache.get(this.lastImageUrl) : undefined
+    const isLoadingImg = Boolean(this.lastImageUrl && !loadedImg && this.imgLoading.has(this.lastImageUrl))
 
     ctx.textBaseline = 'top'
     ctx.shadowColor = glow
-    ctx.shadowBlur = 14
+    ctx.shadowBlur = 10
     ctx.fillStyle = fg
     ctx.beginPath()
-    ctx.arc(sx + 8, 96, 6, 0, Math.PI * 2)
+    ctx.arc(sx + 6, 97, 4.5, 0, Math.PI * 2)
     ctx.fill()
 
-    ctx.font = `600 24px ${ff}`
+    ctx.font = `600 18px ${ff}`
     ctx.globalAlpha = 0.88
-    ctx.fillText(header.slice(0, 44), sx + 26, 82)
+    ctx.fillText(header.slice(0, 56), sx + 20, 88)
 
     const lg = ctx.createLinearGradient(sx, 0, sx + sw, 0)
     lg.addColorStop(0, fg)
     lg.addColorStop(0.85, fg)
     lg.addColorStop(1, 'transparent')
     ctx.strokeStyle = lg
-    ctx.globalAlpha = 0.28
-    ctx.lineWidth = 2
+    ctx.globalAlpha = 0.25
+    ctx.lineWidth = 1.5
     ctx.beginPath()
-    ctx.moveTo(sx, 124)
-    ctx.lineTo(sx + sw, 124)
+    ctx.moveTo(sx, 114)
+    ctx.lineTo(sx + sw, 114)
     ctx.stroke()
 
-    ctx.globalAlpha = 0.98
-    ctx.font = `500 31px ${ff}`
-    ctx.shadowBlur = 16
-    const lines: string[] = []
-    for (const p of bodyRaw) {
-      for (const l of wrapPx(ctx, p, sw, 3)) {
-        if (lines.length < 5) lines.push(l)
+    if (loadedImg && this.lastFullImage) {
+      this.drawOpticalPhoto(ctx, loadedImg, 165, 128, 694, 268, fg)
+    } else if (isLoadingImg && this.lastFullImage) {
+      ctx.globalAlpha = 0.72
+      ctx.fillStyle = fg
+      ctx.font = `500 20px ${ff}`
+      ctx.fillText('Loading photo to optical waveguide…', sx, 235)
+    } else if (loadedImg) {
+      const textW = 445
+      ctx.globalAlpha = 0.96
+      ctx.fillStyle = fg
+      ctx.font = `500 20px ${ff}`
+      ctx.shadowBlur = 11
+      const lines: string[] = []
+      for (const p of bodyRaw) {
+        for (const l of wrapPx(ctx, p, textW, 4)) {
+          if (lines.length < 8) lines.push(l)
+        }
       }
+      lines.forEach((l, i) => ctx.fillText(l, sx, 130 + i * 29))
+      this.drawOpticalPhoto(ctx, loadedImg, sx + textW + 24, 128, sw - textW - 24, 258, fg)
+    } else {
+      ctx.globalAlpha = 0.96
+      ctx.fillStyle = fg
+      ctx.font = `500 22px ${ff}`
+      ctx.shadowBlur = 12
+      const lines: string[] = []
+      for (const p of bodyRaw) {
+        for (const l of wrapPx(ctx, p, sw, 4)) {
+          if (lines.length < 8) lines.push(l)
+        }
+      }
+      lines.forEach((l, i) => ctx.fillText(l, sx, 130 + i * 31))
     }
-    lines.forEach((l, i) => ctx.fillText(l, sx, 146 + i * 44))
 
     if (footer) {
-      ctx.globalAlpha = 0.56
-      ctx.font = `500 20px ${ff}`
-      ctx.shadowBlur = 8
-      ctx.fillText(footer.replace(/\[/g, '').replace(/\]/g, ' ·').slice(0, 56), sx, 412)
+      ctx.globalAlpha = 0.55
+      ctx.fillStyle = fg
+      ctx.font = `500 15px ${ff}`
+      ctx.shadowBlur = 6
+      ctx.fillText(footer.replace(/\[/g, '').replace(/\]/g, ' ·').slice(0, 72), sx, 412)
     }
 
     ctx.globalAlpha = 1

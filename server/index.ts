@@ -240,7 +240,8 @@ app.get('/api/digest', async (_req, res) => {
             const messages = allMsgs
               .map((m: any) => {
                 const raw = (m.message || '').trim()
-                const hasImage = Boolean(m.photo || m.media?.photo || m.media?.className === 'MessageMediaPhoto')
+                const docMime = String(m.media?.document?.mimeType || '')
+                const hasImage = Boolean(m.photo || m.media?.photo || m.media?.className === 'MessageMediaPhoto' || (docMime.startsWith('image/') && !docMime.includes('svg')))
                 const txt = raw || (hasImage ? '📷 Photo' : m.media ? '[Voice / Sticker / File]' : '')
                 if (!txt) return null
                 const urlSet = new Set<string>()
@@ -315,7 +316,11 @@ app.get('/api/media/:chatId/:msgId', async (req, res) => {
       buf = downloaded
       mediaCache.set(key, buf)
     }
-    res.setHeader('Content-Type', 'image/jpeg')
+    const isPng = buf[0] === 0x89 && buf[1] === 0x50
+    const isWebp = buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP'
+    res.setHeader('Content-Type', isPng ? 'image/png' : isWebp ? 'image/webp' : 'image/jpeg')
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
     res.setHeader('Cache-Control', 'public, max-age=3600')
     res.send(buf)
   } catch (err: any) {
