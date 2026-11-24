@@ -8,6 +8,7 @@ export interface GlassesCallbacks {
   onScroll: (dir: number) => void
   onHold: () => void
   onBack?: () => void
+  onMedia?: () => void
 }
 
 const HUD_THEMES = [
@@ -158,7 +159,7 @@ export class Glasses3DViewer {
   constructor(cb: GlassesCallbacks) {
     this.domElement = document.createElement('div')
     this.domElement.style.cssText =
-      'position:relative;width:100%;height:350px;border-radius:16px;overflow:hidden;border:1px solid #1d4230;background:radial-gradient(circle at 22% 25%,rgba(18,70,52,0.34) 0%,transparent 50%),radial-gradient(circle at 78% 72%,rgba(16,46,64,0.30) 0%,transparent 52%),radial-gradient(circle at 50% 45%,#0b1713 0%,#030605 88%);cursor:grab;user-select:none;'
+      'position:relative;width:100%;height:100%;border-radius:0;overflow:hidden;border:none;background:radial-gradient(circle at 22% 25%,rgba(18,70,52,0.34) 0%,transparent 50%),radial-gradient(circle at 78% 72%,rgba(16,46,64,0.30) 0%,transparent 52%),radial-gradient(circle at 50% 45%,#0b1713 0%,#030605 88%);cursor:grab;user-select:none;'
 
     this.camera.position.copy(this.desiredCamPos)
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
@@ -526,6 +527,14 @@ export class Glasses3DViewer {
         localPos: new THREE.Vector3(0.18, -0.14, -1.15),
         kind: 'HOLD',
         run: () => cb.onHold(),
+      },
+      {
+        label: '🖼 Media',
+        hint: 'Left Temple: view chat photos & links on lens',
+        anchor: this.rightPivot,
+        localPos: new THREE.Vector3(0.18, -0.44, -1.62),
+        kind: 'TAP',
+        run: () => cb.onMedia?.(),
       },
     ]
 
