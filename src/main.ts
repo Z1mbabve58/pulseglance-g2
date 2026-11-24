@@ -8,6 +8,12 @@ import {
 } from '@evenrealities/even_hub_sdk'
 import type { EvenHubEvent } from '@evenrealities/even_hub_sdk'
 
+interface ChatMessage {
+  sender: string
+  text: string
+  out: boolean
+}
+
 interface ChatCard {
   id: string
   title: string
@@ -16,9 +22,10 @@ interface ChatCard {
   summary: string
   fullDigest?: string
   replies: string[]
+  messages?: ChatMessage[]
 }
 
-type ScreenMode = 'LOADING' | 'FEED' | 'REPLY' | 'RECORDING' | 'TRANSCRIBING' | 'SENDING' | 'SENT' | 'ERROR'
+type ScreenMode = 'LOADING' | 'FEED' | 'HISTORY' | 'REPLY' | 'RECORDING' | 'TRANSCRIBING' | 'SENDING' | 'SENT' | 'ERROR'
 
 const BACKEND_URL = 'http://localhost:3001'
 let bridge: any = null
@@ -36,6 +43,7 @@ let cards: ChatCard[] = []
 let activeTab: 'DMS' | 'GROUPS' = 'DMS'
 let chatIdx = 0
 let replyIdx = 0
+let msgScrollEnd = 0
 let statusNote = ''
 let lastVoiceTranscript = ''
 let pcmChunks: Uint8Array[] = []
@@ -54,6 +62,22 @@ function getActiveCard(): ChatCard | undefined {
   if (list.length === 0) return undefined
   if (chatIdx >= list.length) chatIdx = 0
   return list[chatIdx]
+}
+
+function resetChatCursor(): void {
+  replyIdx = 0
+  const msgs = getActiveCard()?.messages || []
+  msgScrollEnd = msgs.length
+}
+
+function getHistoryWindow(card?: ChatCard): { start: number; end: number; total: number; slice: ChatMessage[] } {
+  const msgs = card?.messages || []
+  const total = msgs.length
+  if (total === 0) return { start: 0, end: 0, total: 0, slice: [] }
+  const minEnd = Math.min(3, total)
+  const end = Math.min(total, Math.max(minEnd, msgScrollEnd || total))
+  const start = Math.max(0, end - 3)
+  return { start, end, total, slice: msgs.slice(start, end) }
 }
 
 const formatBadge = (n: number) => (n <= 0 ? '' : n > 99 ? ' (99+)' : ` (${n})`)
@@ -102,6 +126,22 @@ function buildScreenText(): string {
   const list = getVisibleCards()
   const card = getActiveCard()
   if (!card) return `PULSEGLANCE G2 // ${activeTab}\n\nNo chats in this tab.\nSwitch tab or press Sync.`
+
+  if (mode === 'HISTORY') {
+    const { start, end, total, slice } = getHistoryWindow(card)
+    if (total === 0) {
+      return `THREAD // ${card.title.slice(0, 26)}\n\n${wrapText(card.summary, 48, 3)}\n\n[Click] Reply [Hold] Voice [2x] Back`
+    }
+    const header = `THREAD [${start + 1}-${end}/${total}] ${card.title.slice(0, 19)}`
+    const body = slice
+      .map((m) => {
+        const who = m.out ? 'Я' : m.sender.slice(0, 10)
+        return wrapText(`${who}: ${m.text}`, 48, 2)
+      })
+      .join('\n')
+    return `${header}\n${body}\n[Scroll] History [Click] Reply [Hold] Voice`
+  }
+
   if (mode === 'RECORDING') {
     const hint = speechTranscript ? `\nHeard: "${speechTranscript.slice(-42)}"` : '\nSpeak reply (auto-translates)...'
     return `PULSEGLANCE G2 // VOICE INPUT\nTo: ${card.title.slice(0, 28)}${hint}\n\n[Click] Done & AI Draft  [2x] Cancel`
@@ -114,7 +154,7 @@ function buildScreenText(): string {
     return `REPLY -> ${card.title.slice(0, 22)} [${replyIdx + 1}/${card.replies.length || 1}]\n\n${wrapText(rep, 48, 2)}\n\n[Scroll] Next [Click] Send [Hold] Voice`
   }
   const tag = activeTab === 'DMS' ? 'DM' : 'GRP'
-  return `[${tag} ${chatIdx + 1}/${list.length}] ${card.title.slice(0, 22)}${formatBadge(card.unreadCount)}\n${wrapText(card.summary, 48, 4)}\n[Scroll] Next [Click] Reply [Hold] Voice`
+  return `[${tag} ${chatIdx + 1}/${list.length}] ${card.title.slice(0, 22)}${formatBadge(card.unreadCount)}\n${wrapText(card.summary, 48, 4)}\n[Scroll] Chat [Click] Thread [Hold] Voice`
 }
 
 function renderCompanion(): void {
@@ -126,11 +166,27 @@ function renderCompanion(): void {
   const card = getActiveCard()
   const isRec = mode === 'RECORDING'
   const stCol = isRec ? '#f87171' : mode === 'SENT' ? '#34d399' : '#4ade80'
+  const win = getHistoryWindow(card)
+
+  const threadHtml = card && win.total > 0
+    ? (card.messages || []).map((m, idx) => {
+        const inHud = idx >= win.start && idx < win.end
+        return `<div data-msg-idx="${idx}" class="${inHud ? 'hud-active-msg' : ''}" style="padding:8px 10px;border-radius:9px;margin-bottom:6px;border:1px solid ${
+          inHud ? '#2e6f4e' : '#152b20'
+        };background:${m.out ? (inHud ? '#123323' : '#0c2217') : (inHud ? '#0e2419' : '#08130e')};color:#d1fae5;font-size:12px;line-height:1.45;">
+          <div style="display:flex;justify-content:space-between;font-size:10px;color:${m.out ? '#4ade80' : '#6ee7b7'};margin-bottom:2px;font-weight:700;">
+            <span>${esc(m.sender)}</span>
+            ${inHud ? '<span style="opacity:0.8;">ON HUD</span>' : ''}
+          </div>
+          <div>${esc(m.text)}</div>
+        </div>`
+      }).join('')
+    : `<div style="font-size:12px;color:#6ee7b7;opacity:0.75;">${esc(card?.fullDigest || card?.summary || '')}</div>`
 
   const repliesHtml = card
     ? card.replies.map((rep, idx) => {
         const act = idx === replyIdx
-        return `<div data-reply-idx="${idx}" class="reply-pill" style="padding:10px 12px;border-radius:10px;border:1px solid ${act ? '#34d399' : '#183326'};background:${act ? '#123524' : '#0a1510'};color:${act ? '#ecfdf5' : '#86efac'};font-size:12px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;">
+        return `<div data-reply-idx="${idx}" class="reply-pill" style="padding:9px 12px;border-radius:10px;border:1px solid ${act ? '#34d399' : '#183326'};background:${act ? '#123524' : '#0a1510'};color:${act ? '#ecfdf5' : '#86efac'};font-size:12px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;">
           <span>${idx === 0 && lastVoiceTranscript ? '🎙 ' : ''}${esc(rep)}</span>
           <span style="font-size:10px;opacity:0.75;padding:2px 6px;border-radius:6px;background:#07110c;">${act ? 'SELECTED' : `#${idx + 1}`}</span>
         </div>`
@@ -138,9 +194,9 @@ function renderCompanion(): void {
     : ''
 
   root.innerHTML = `
-    <div style="min-height:100vh;background:radial-gradient(circle at 50% 0%,#0f291e 0%,#050907 65%);padding:24px 16px;box-sizing:border-box;">
-      <div style="max-width:620px;margin:0 auto;padding:22px;border:1px solid #1d3b2c;border-radius:20px;background:rgba(9,18,14,0.94);box-shadow:0 20px 60px rgba(0,0,0,0.7);">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+    <div style="min-height:100vh;background:radial-gradient(circle at 50% 0%,#0f291e 0%,#050907 65%);padding:20px 16px;box-sizing:border-box;">
+      <div style="max-width:620px;margin:0 auto;padding:20px;border:1px solid #1d3b2c;border-radius:20px;background:rgba(9,18,14,0.94);box-shadow:0 20px 60px rgba(0,0,0,0.7);">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
           <div style="display:flex;align-items:center;gap:10px;">
             <div style="width:10px;height:10px;border-radius:50%;background:${stCol};box-shadow:0 0 12px ${stCol};"></div>
             <div>
@@ -151,51 +207,78 @@ function renderCompanion(): void {
           <span style="font-size:10px;padding:4px 10px;border-radius:999px;background:#132a1e;color:${stCol};border:1px solid #22543d;font-weight:700;">${mode}</span>
         </div>
 
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:5px;border-radius:12px;background:#07110c;border:1px solid #183426;margin-bottom:14px;">
-          <button id="tab-dms" style="padding:9px;border-radius:9px;border:1px solid ${activeTab === 'DMS' ? '#34d399' : 'transparent'};background:${activeTab === 'DMS' ? '#133826' : 'transparent'};color:${activeTab === 'DMS' ? '#ecfdf5' : '#6ee7b7'};font-family:inherit;font-size:12px;font-weight:700;cursor:pointer;">👤 DMs Only (${dmCount})</button>
-          <button id="tab-groups" style="padding:9px;border-radius:9px;border:1px solid ${activeTab === 'GROUPS' ? '#34d399' : 'transparent'};background:${activeTab === 'GROUPS' ? '#133826' : 'transparent'};color:${activeTab === 'GROUPS' ? '#ecfdf5' : '#6ee7b7'};font-family:inherit;font-size:12px;font-weight:700;cursor:pointer;">👥 Groups Only (${grpCount})</button>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:5px;border-radius:12px;background:#07110c;border:1px solid #183426;margin-bottom:12px;">
+          <button id="tab-dms" style="padding:8px;border-radius:9px;border:1px solid ${activeTab === 'DMS' ? '#34d399' : 'transparent'};background:${activeTab === 'DMS' ? '#133826' : 'transparent'};color:${activeTab === 'DMS' ? '#ecfdf5' : '#6ee7b7'};font-family:inherit;font-size:12px;font-weight:700;cursor:pointer;">👤 DMs Only (${dmCount})</button>
+          <button id="tab-groups" style="padding:8px;border-radius:9px;border:1px solid ${activeTab === 'GROUPS' ? '#34d399' : 'transparent'};background:${activeTab === 'GROUPS' ? '#133826' : 'transparent'};color:${activeTab === 'GROUPS' ? '#ecfdf5' : '#6ee7b7'};font-family:inherit;font-size:12px;font-weight:700;cursor:pointer;">👥 Groups Only (${grpCount})</button>
         </div>
 
-        <div style="padding:14px;border-radius:18px;background:#0e1612;border:1px solid #2b3f35;margin-bottom:14px;">
-          <div style="display:flex;justify-content:space-between;font-size:10px;color:#6ee7b7;opacity:0.65;margin-bottom:8px;">
+        <div style="padding:12px;border-radius:16px;background:#0e1612;border:1px solid #2b3f35;margin-bottom:12px;">
+          <div style="display:flex;justify-content:space-between;font-size:10px;color:#6ee7b7;opacity:0.65;margin-bottom:6px;">
             <span>EVEN G2 WAVEGUIDE DISPLAY • 576×288</span>
             <span>${card ? `${activeTab} • ${chatIdx + 1}/${list.length}` : 'EMPTY TAB'}</span>
           </div>
-          <div style="background:#040d08;border:1px solid #1d4d35;border-radius:12px;padding:18px;min-height:132px;display:flex;align-items:center;">
-            <pre style="margin:0;width:100%;font-family:'SF Mono',Menlo,monospace;font-size:13.5px;line-height:1.55;color:#4ade80;text-shadow:0 0 10px rgba(74,222,128,0.5);white-space:pre-wrap;">${esc(buildScreenText())}</pre>
+          <div style="background:#040d08;border:1px solid #1d4d35;border-radius:12px;padding:15px;min-height:132px;display:flex;align-items:center;">
+            <pre style="margin:0;width:100%;font-family:'SF Mono',Menlo,monospace;font-size:13px;line-height:1.5;color:#4ade80;text-shadow:0 0 10px rgba(74,222,128,0.5);white-space:pre-wrap;">${esc(buildScreenText())}</pre>
           </div>
         </div>
 
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px;">
-          <button id="btn-prev" style="padding:10px 8px;border-radius:10px;border:1px solid #234735;background:#0e1d16;color:#a7f3d0;font-family:inherit;font-size:12px;font-weight:600;cursor:pointer;">◀ Prev</button>
-          <button id="btn-next" style="padding:10px 8px;border-radius:10px;border:1px solid #234735;background:#0e1d16;color:#a7f3d0;font-family:inherit;font-size:12px;font-weight:600;cursor:pointer;">Next ▶</button>
-          <button id="btn-voice" style="padding:10px 8px;border-radius:10px;border:1px solid ${isRec ? '#ef4444' : '#2f6f4e'};background:${isRec ? '#451212' : '#133323'};color:${isRec ? '#fca5a5' : '#4ade80'};font-family:inherit;font-size:12px;font-weight:700;cursor:pointer;">${isRec ? '⏹ Stop' : '🎙 Voice'}</button>
-          <button id="btn-send" style="padding:10px 8px;border-radius:10px;border:1px solid #34d399;background:#10b981;color:#03150d;font-family:inherit;font-size:12px;font-weight:800;cursor:pointer;">Send ↵</button>
+        <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-bottom:14px;">
+          <button id="btn-prev" style="padding:9px 4px;border-radius:10px;border:1px solid #234735;background:#0e1d16;color:#a7f3d0;font-family:inherit;font-size:11.5px;font-weight:600;cursor:pointer;">◀ Chat</button>
+          <button id="btn-next" style="padding:9px 4px;border-radius:10px;border:1px solid #234735;background:#0e1d16;color:#a7f3d0;font-family:inherit;font-size:11.5px;font-weight:600;cursor:pointer;">Chat ▶</button>
+          <button id="btn-hist" style="padding:9px 4px;border-radius:10px;border:1px solid ${mode === 'HISTORY' ? '#34d399' : '#234735'};background:${mode === 'HISTORY' ? '#143826' : '#0e1d16'};color:#ecfdf5;font-family:inherit;font-size:11.5px;font-weight:700;cursor:pointer;">${mode === 'HISTORY' ? '✨ Digest' : '📖 Thread'}</button>
+          <button id="btn-voice" style="padding:9px 4px;border-radius:10px;border:1px solid ${isRec ? '#ef4444' : '#2f6f4e'};background:${isRec ? '#451212' : '#133323'};color:${isRec ? '#fca5a5' : '#4ade80'};font-family:inherit;font-size:11.5px;font-weight:700;cursor:pointer;">${isRec ? '⏹ Stop' : '🎙 Voice'}</button>
+          <button id="btn-send" style="padding:9px 4px;border-radius:10px;border:1px solid #34d399;background:#10b981;color:#03150d;font-family:inherit;font-size:11.5px;font-weight:800;cursor:pointer;">Send ↵</button>
         </div>
 
-        ${card ? `<div style="margin-bottom:14px;">
-          <div style="font-size:11px;color:#6ee7b7;margin-bottom:6px;">ACTIVE: <strong style="color:#ecfdf5;">${esc(card.title)}${formatBadge(card.unreadCount)}</strong></div>
-          <div style="background:#0b1711;padding:12px;border-radius:10px;border:1px solid #193527;font-size:12.5px;line-height:1.5;color:#d1fae5;">${esc(card.fullDigest || card.summary)}</div>
+        ${card ? `<div style="margin-bottom:12px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:#6ee7b7;margin-bottom:6px;">
+            <span>THREAD: <strong style="color:#ecfdf5;">${esc(card.title)}${formatBadge(card.unreadCount)}</strong> ${win.total ? `(${win.start + 1}-${win.end} of ${win.total})` : ''}</span>
+            <div style="display:flex;gap:6px;">
+              <button id="btn-msg-up" style="padding:3px 9px;border-radius:6px;border:1px solid #244735;background:#0f1c16;color:#a7f3d0;font-family:inherit;font-size:10.5px;cursor:pointer;">▲ Older</button>
+              <button id="btn-msg-down" style="padding:3px 9px;border-radius:6px;border:1px solid #244735;background:#0f1c16;color:#a7f3d0;font-family:inherit;font-size:10.5px;cursor:pointer;">▼ Newer</button>
+            </div>
+          </div>
+          <div id="thread-box" style="max-height:175px;overflow-y:auto;background:#07100c;padding:8px;border-radius:10px;border:1px solid #193527;">${threadHtml}</div>
         </div>
-        <div style="margin-bottom:14px;display:flex;flex-direction:column;gap:7px;">${repliesHtml}</div>` : ''}
+        <div style="margin-bottom:12px;display:flex;flex-direction:column;gap:6px;">${repliesHtml}</div>` : ''}
 
-        ${lastVoiceTranscript ? `<div style="font-size:11px;color:#86efac;background:#0c2217;border:1px solid #1e4632;padding:8px 12px;border-radius:9px;margin-bottom:14px;">🎙 Spoken: "${esc(lastVoiceTranscript)}"</div>` : ''}
+        ${lastVoiceTranscript ? `<div style="font-size:11px;color:#86efac;background:#0c2217;border:1px solid #1e4632;padding:8px 12px;border-radius:9px;margin-bottom:12px;">🎙 Spoken: "${esc(lastVoiceTranscript)}"</div>` : ''}
 
-        <div style="display:flex;justify-content:space-between;align-items:center;border-top:1px solid #162e22;padding-top:12px;">
-          <span style="font-size:10.5px;color:#6ee7b7;opacity:0.65;">Tab • ←/→ Chats • ↑/↓ Replies • Space Voice • Enter Send</span>
-          <button id="btn-refresh" style="padding:7px 14px;border-radius:8px;border:1px solid #244735;background:#0f1c16;color:#a7f3d0;font-family:inherit;font-size:11px;font-weight:600;cursor:pointer;">↻ Sync</button>
+        <div style="display:flex;justify-content:space-between;align-items:center;border-top:1px solid #162e22;padding-top:10px;">
+          <span style="font-size:10.5px;color:#6ee7b7;opacity:0.65;">Tab • ←/→ Chats • ↑/↓ Scroll • H Thread • Space Voice • Enter Send</span>
+          <button id="btn-refresh" style="padding:6px 12px;border-radius:8px;border:1px solid #244735;background:#0f1c16;color:#a7f3d0;font-family:inherit;font-size:11px;font-weight:600;cursor:pointer;">↻ Sync</button>
         </div>
       </div>
     </div>`
 
-  document.getElementById('tab-dms')?.addEventListener('click', () => { activeTab = 'DMS'; chatIdx = 0; replyIdx = 0; if (mode !== 'RECORDING') mode = 'FEED'; void render() })
-  document.getElementById('tab-groups')?.addEventListener('click', () => { activeTab = 'GROUPS'; chatIdx = 0; replyIdx = 0; if (mode !== 'RECORDING') mode = 'FEED'; void render() })
-  document.getElementById('btn-prev')?.addEventListener('click', () => { if (!list.length) return; chatIdx = (chatIdx - 1 + list.length) % list.length; replyIdx = 0; if (mode !== 'RECORDING') mode = 'FEED'; void render() })
-  document.getElementById('btn-next')?.addEventListener('click', () => { if (!list.length) return; chatIdx = (chatIdx + 1) % list.length; replyIdx = 0; if (mode !== 'RECORDING') mode = 'FEED'; void render() })
+  const threadBox = document.getElementById('thread-box')
+  const activeEl = threadBox?.querySelector('.hud-active-msg') as HTMLElement | null
+  if (threadBox && activeEl) {
+    threadBox.scrollTop = Math.max(0, activeEl.offsetTop - threadBox.offsetTop - 8)
+  }
+
+  document.getElementById('tab-dms')?.addEventListener('click', () => { activeTab = 'DMS'; chatIdx = 0; resetChatCursor(); if (mode !== 'RECORDING') mode = 'FEED'; void render() })
+  document.getElementById('tab-groups')?.addEventListener('click', () => { activeTab = 'GROUPS'; chatIdx = 0; resetChatCursor(); if (mode !== 'RECORDING') mode = 'FEED'; void render() })
+  document.getElementById('btn-prev')?.addEventListener('click', () => { if (!list.length) return; chatIdx = (chatIdx - 1 + list.length) % list.length; resetChatCursor(); if (mode !== 'RECORDING') mode = 'FEED'; void render() })
+  document.getElementById('btn-next')?.addEventListener('click', () => { if (!list.length) return; chatIdx = (chatIdx + 1) % list.length; resetChatCursor(); if (mode !== 'RECORDING') mode = 'FEED'; void render() })
+  document.getElementById('btn-hist')?.addEventListener('click', () => { mode = mode === 'HISTORY' ? 'FEED' : 'HISTORY'; void render() })
+  document.getElementById('btn-msg-up')?.addEventListener('click', () => { scrollHistory(-1) })
+  document.getElementById('btn-msg-down')?.addEventListener('click', () => { scrollHistory(1) })
   document.getElementById('btn-voice')?.addEventListener('click', () => { if (mode === 'RECORDING') void finishVoiceRecording(); else void startVoiceRecording() })
   document.getElementById('btn-send')?.addEventListener('click', () => { void sendSelectedReply() })
   document.querySelectorAll('.reply-pill').forEach((el) => el.addEventListener('click', () => { replyIdx = Number((el as HTMLElement).dataset.replyIdx || 0); mode = 'REPLY'; void render() }))
   document.getElementById('btn-refresh')?.addEventListener('click', () => { void loadDigest() })
+}
+
+function scrollHistory(delta: number): void {
+  const card = getActiveCard()
+  const msgs = card?.messages || []
+  if (!msgs.length) return
+  const minEnd = Math.min(3, msgs.length)
+  const cur = msgScrollEnd || msgs.length
+  msgScrollEnd = Math.max(minEnd, Math.min(msgs.length, cur + delta))
+  if (mode !== 'RECORDING') mode = 'HISTORY'
+  void render()
 }
 
 async function render(): Promise<void> {
@@ -225,7 +308,7 @@ async function loadDigest(): Promise<void> {
     const data = await res.json()
     if (!data.ok) throw new Error(data.error || 'Failed to sync')
     cards = data.cards || []
-    chatIdx = 0; replyIdx = 0; mode = 'FEED'
+    chatIdx = 0; resetChatCursor(); mode = 'FEED'
   } catch (err: any) {
     statusNote = err?.message || 'Backend unreachable'
     mode = 'ERROR'
@@ -305,11 +388,18 @@ async function sendSelectedReply(): Promise<void> {
 
 window.addEventListener('keydown', (e) => {
   const list = getVisibleCards(); const active = getActiveCard()
-  if (e.key === 'Tab') { e.preventDefault(); activeTab = activeTab === 'DMS' ? 'GROUPS' : 'DMS'; chatIdx = 0; replyIdx = 0; mode = 'FEED'; void render() }
-  else if (e.key === 'ArrowRight' && list.length) { chatIdx = (chatIdx + 1) % list.length; replyIdx = 0; mode = 'FEED'; void render() }
-  else if (e.key === 'ArrowLeft' && list.length) { chatIdx = (chatIdx - 1 + list.length) % list.length; replyIdx = 0; mode = 'FEED'; void render() }
-  else if (e.key === 'ArrowDown' && active) { replyIdx = (replyIdx + 1) % (active.replies.length || 1); mode = 'REPLY'; void render() }
-  else if (e.key === 'ArrowUp' && active) { const l = active.replies.length || 1; replyIdx = (replyIdx - 1 + l) % l; mode = 'REPLY'; void render() }
+  if (e.key === 'Tab') { e.preventDefault(); activeTab = activeTab === 'DMS' ? 'GROUPS' : 'DMS'; chatIdx = 0; resetChatCursor(); mode = 'FEED'; void render() }
+  else if (e.key === 'ArrowRight' && list.length) { chatIdx = (chatIdx + 1) % list.length; resetChatCursor(); mode = 'FEED'; void render() }
+  else if (e.key === 'ArrowLeft' && list.length) { chatIdx = (chatIdx - 1 + list.length) % list.length; resetChatCursor(); mode = 'FEED'; void render() }
+  else if (e.key === 'ArrowUp') {
+    e.preventDefault()
+    if (mode === 'REPLY' && active) { const l = active.replies.length || 1; replyIdx = (replyIdx - 1 + l) % l; void render() }
+    else scrollHistory(-1)
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault()
+    if (mode === 'REPLY' && active) { replyIdx = (replyIdx + 1) % (active.replies.length || 1); void render() }
+    else scrollHistory(1)
+  } else if (e.key.toLowerCase() === 'h') { mode = mode === 'HISTORY' ? 'FEED' : 'HISTORY'; void render() }
   else if (e.code === 'Space') { e.preventDefault(); if (mode === 'RECORDING') void finishVoiceRecording(); else void startVoiceRecording() }
   else if (e.key === 'Enter') { e.preventDefault(); void sendSelectedReply() }
 })
@@ -325,11 +415,19 @@ bridge?.onEvenHubEvent(async (event: EvenHubEvent) => {
   }
   const list = getVisibleCards()
   if (mode === 'FEED') {
-    if (type === OsEventTypeList.SCROLL_TOP_EVENT && list.length) { chatIdx = (chatIdx - 1 + list.length) % list.length; replyIdx = 0; await render() }
-    else if (type === OsEventTypeList.SCROLL_BOTTOM_EVENT && list.length) { chatIdx = (chatIdx + 1) % list.length; replyIdx = 0; await render() }
-    else if ((type === OsEventTypeList.CLICK_EVENT || type === undefined) && list.length) { replyIdx = 0; mode = 'REPLY'; await render() }
+    if (type === OsEventTypeList.SCROLL_TOP_EVENT && list.length) { chatIdx = (chatIdx - 1 + list.length) % list.length; resetChatCursor(); await render() }
+    else if (type === OsEventTypeList.SCROLL_BOTTOM_EVENT && list.length) { chatIdx = (chatIdx + 1) % list.length; resetChatCursor(); await render() }
+    else if ((type === OsEventTypeList.CLICK_EVENT || type === undefined) && list.length) { resetChatCursor(); mode = 'HISTORY'; await render() }
     else if (type === OsEventTypeList.LONG_PRESS_EVENT) { if (list.length) await startVoiceRecording(); else await loadDigest() }
     else if (type === OsEventTypeList.DOUBLE_CLICK_EVENT) { await bridge?.shutDownPageContainer(1) }
+    return
+  }
+  if (mode === 'HISTORY') {
+    if (type === OsEventTypeList.SCROLL_TOP_EVENT) { scrollHistory(-1) }
+    else if (type === OsEventTypeList.SCROLL_BOTTOM_EVENT) { scrollHistory(1) }
+    else if (type === OsEventTypeList.CLICK_EVENT || type === undefined) { replyIdx = 0; mode = 'REPLY'; await render() }
+    else if (type === OsEventTypeList.LONG_PRESS_EVENT) { await startVoiceRecording() }
+    else if (type === OsEventTypeList.DOUBLE_CLICK_EVENT) { mode = 'FEED'; await render() }
     return
   }
   if (mode === 'REPLY') {
@@ -338,7 +436,7 @@ bridge?.onEvenHubEvent(async (event: EvenHubEvent) => {
     else if (type === OsEventTypeList.SCROLL_BOTTOM_EVENT) { replyIdx = (replyIdx + 1) % len; await render() }
     else if (type === OsEventTypeList.CLICK_EVENT || type === undefined) { await sendSelectedReply() }
     else if (type === OsEventTypeList.LONG_PRESS_EVENT) { await startVoiceRecording() }
-    else if (type === OsEventTypeList.DOUBLE_CLICK_EVENT) { mode = 'FEED'; await render() }
+    else if (type === OsEventTypeList.DOUBLE_CLICK_EVENT) { mode = 'HISTORY'; await render() }
   }
 })
 

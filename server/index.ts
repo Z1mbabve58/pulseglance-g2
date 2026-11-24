@@ -46,25 +46,15 @@ function buildSmartFallback(rawLatest: string, isOut: boolean) {
 
   let replies: string[]
   if (isRu) {
-    if (isQuestion) {
-      replies = ['Да, всё верно!', 'Сейчас уточню и напишу', 'Давай обсудим чуть позже']
-    } else if (hasLink) {
-      replies = ['Спасибо, сейчас открою!', 'Гляну ссылку и отпишусь', 'Принял, изучаю']
-    } else if (isOut) {
-      replies = ['Есть апдейт по этому?', 'На связи, если что пиши', 'Жду твоего ответа']
-    } else {
-      replies = ['Понял, спасибо за инфу!', 'Супер, принято', 'Сейчас посмотрю и отвечу']
-    }
+    if (isQuestion) replies = ['Да, всё верно!', 'Сейчас уточню и напишу', 'Давай обсудим чуть позже']
+    else if (hasLink) replies = ['Спасибо, сейчас открою!', 'Гляну ссылку и отпишусь', 'Принял, изучаю']
+    else if (isOut) replies = ['Есть апдейт по этому?', 'На связи, если что пиши', 'Жду твоего ответа']
+    else replies = ['Понял, спасибо за инфу!', 'Супер, принято', 'Сейчас посмотрю и отвечу']
   } else {
-    if (isQuestion) {
-      replies = ['Yes, sounds good!', 'Let me check and get back to you', 'Can we discuss shortly?']
-    } else if (hasLink) {
-      replies = ['Thanks, checking the link now!', 'Got it, taking a look', 'Saved, will review soon']
-    } else if (isOut) {
-      replies = ['Any update on this?', 'Following up when you are free', 'Let me know your thoughts']
-    } else {
-      replies = ['Got it, thanks for the update!', 'Sounds great, on it', 'Will review and reply shortly']
-    }
+    if (isQuestion) replies = ['Yes, sounds good!', 'Let me check and get back to you', 'Can we discuss shortly?']
+    else if (hasLink) replies = ['Thanks, checking the link now!', 'Got it, taking a look', 'Saved, will review soon']
+    else if (isOut) replies = ['Any update on this?', 'Following up when you are free', 'Let me know your thoughts']
+    else replies = ['Got it, thanks for the update!', 'Sounds great, on it', 'Will review and reply shortly']
   }
 
   return { summary, fullDigest, replies }
@@ -205,15 +195,8 @@ app.get('/api/digest', async (_req, res) => {
       return (b.date || 0) - (a.date || 0)
     }
 
-    const humanDms = dialogs
-      .filter((d) => isHumanDm(d) && d.message)
-      .sort(sortByUnreadAndNewest)
-      .slice(0, 5)
-
-    const groups = dialogs
-      .filter((d) => !isHumanDm(d) && isMainFolder(d) && d.message)
-      .sort(sortByUnreadAndNewest)
-      .slice(0, 10)
+    const humanDms = dialogs.filter((d) => isHumanDm(d) && d.message).sort(sortByUnreadAndNewest).slice(0, 5)
+    const groups = dialogs.filter((d) => !isHumanDm(d) && isMainFolder(d) && d.message).sort(sortByUnreadAndNewest).slice(0, 10)
 
     const selected = [...humanDms, ...groups]
     const cards: any[] = []
@@ -227,29 +210,36 @@ app.get('/api/digest', async (_req, res) => {
             const title = getTitle(d)
             if (d.entity) dialogEntities.set(id, d.entity)
 
-            const fetched = await client.getMessages(d.inputEntity || d.entity || d.id, { limit: 6 })
+            const fetched = await client.getMessages(d.inputEntity || d.entity || d.id, { limit: 15 })
             const allMsgs = [...fetched]
             if (d.message && !allMsgs.some((m) => m.id === d.message?.id)) {
               allMsgs.push(d.message)
             }
             allMsgs.sort((a: any, b: any) => (a.date || 0) - (b.date || 0))
 
-            const formattedLines = allMsgs
+            const messages = allMsgs
               .map((m: any) => {
-                const txt = (m.message || '').trim()
-                if (!txt) return ''
-                const sender = m.out ? 'Я' : title
-                return `${sender}: ${txt}`
+                const raw = (m.message || '').trim()
+                const txt = raw || (m.media ? '[Media / Voice / Sticker]' : '')
+                if (!txt) return null
+                let senderName = m.out ? 'Я' : title
+                if (!m.out && !isHumanDm(d) && m.sender) {
+                  senderName = m.sender.firstName || m.sender.title || m.sender.username || title
+                }
+                return {
+                  sender: senderName,
+                  text: trimAtWord(txt, 240),
+                  out: Boolean(m.out),
+                }
               })
-              .filter(Boolean)
+              .filter(Boolean) as { sender: string; text: string; out: boolean }[]
 
+            const recentLines = messages.slice(-6).map((m) => `${m.sender}: ${m.text}`)
             const lastMsgObj = allMsgs[allMsgs.length - 1] || d.message
             const isOut = Boolean(lastMsgObj?.out)
-            const latestLine =
-              formattedLines[formattedLines.length - 1] ||
-              (d.message?.message ? `${isOut ? 'Я' : title}: ${d.message.message}` : '[Media / Voice]')
+            const latestLine = recentLines[recentLines.length - 1] || `${isOut ? 'Я' : title}: [Media]`
+            const textBlock = recentLines.length > 0 ? recentLines.join('\n') : latestLine
 
-            const textBlock = formattedLines.length > 0 ? formattedLines.join('\n') : latestLine
             const ai = await summarizeAndDraft(title, textBlock, latestLine, isOut)
 
             return {
@@ -260,6 +250,7 @@ app.get('/api/digest', async (_req, res) => {
               summary: ai.summary,
               fullDigest: ai.fullDigest,
               replies: ai.replies,
+              messages,
             }
           } catch (itemErr) {
             console.error('Skip dialog due to error:', itemErr)
