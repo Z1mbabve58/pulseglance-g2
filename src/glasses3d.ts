@@ -132,6 +132,8 @@ export class Glasses3DViewer {
   private themeIdx = 0
   private foldProgress = 1
   private targetFold = 1
+  private hasAutoUnfolded = false
+  private foldBtn = document.createElement("button")
   private cameraAnimating = false
   private desiredCamPos = new THREE.Vector3(0, 0.04, 6.25)
   private desiredTarget = new THREE.Vector3(0, -0.04, -0.1)
@@ -183,7 +185,8 @@ export class Glasses3DViewer {
     // Unfold temples smoothly the moment the user starts rotating the 3D glasses
     this.controls.addEventListener('start', () => {
       this.cameraAnimating = false
-      if (this.targetFold > 0.5) {
+      if (!this.hasAutoUnfolded && this.targetFold > 0.5) {
+        this.hasAutoUnfolded = true
         this.targetFold = 0
       }
     })
@@ -286,7 +289,10 @@ export class Glasses3DViewer {
       this.toggleView()
     }
 
-    topR.append(zInBtn, zOutBtn, this.colorBtn, this.pinsBtn, this.viewBtn)
+    this.foldBtn.style.cssText = bCss
+    this.foldBtn.textContent = "📂 Open [F]"
+    this.foldBtn.onclick = (e) => { e.stopPropagation(); this.hasAutoUnfolded = true; this.targetFold = this.targetFold > 0.5 ? 0 : 1 }
+    topR.append(this.foldBtn, zInBtn, zOutBtn, this.colorBtn, this.pinsBtn, this.viewBtn)
 
     const hint = document.createElement('div')
     hint.style.cssText =
@@ -614,7 +620,7 @@ export class Glasses3DViewer {
         e.preventDefault()
         this.zoomKeyDir = 1
       } else if (e.code === 'KeyF') {
-        this.targetFold = this.targetFold > 0.5 ? 0 : 1
+        this.hasAutoUnfolded = true; this.targetFold = this.targetFold > 0.5 ? 0 : 1
       }
     })
     window.addEventListener('keyup', (e) => {
@@ -789,6 +795,8 @@ export class Glasses3DViewer {
     if (Math.abs(this.targetFold - this.foldProgress) < 0.001) this.foldProgress = this.targetFold
     this.rightPivot.rotation.y = this.foldProgress * 1.49
     this.leftPivot.rotation.y = -this.foldProgress * 1.42
+    const fLbl = this.targetFold > 0.5 ? "📂 Open [F]" : "🕶 Fold [F]"
+    if (this.foldBtn.textContent !== fLbl) this.foldBtn.textContent = fLbl
 
     // Continuous buttery keyboard zoom (+ / -)
     if (this.zoomKeyDir !== 0) {
