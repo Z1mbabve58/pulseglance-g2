@@ -11,6 +11,7 @@ import type { EvenHubEvent } from '@evenrealities/even_hub_sdk'
 interface ChatCard {
   id: string
   title: string
+  isUser?: boolean
   unreadCount: number
   summary: string
   replies: string[]
@@ -23,6 +24,7 @@ const bridge = await waitForEvenAppBridge()
 
 let mode: ScreenMode = 'LOADING'
 let cards: ChatCard[] = []
+let dmOnly = false
 let chatIdx = 0
 let replyIdx = 0
 let statusNote = ''
@@ -31,6 +33,19 @@ let pcmChunks: Uint8Array[] = []
 let speechRecognition: any = null
 let speechTranscript = ''
 let pageCreated = false
+
+function getVisibleCards(): ChatCard[] {
+  if (!dmOnly) return cards
+  const dms = cards.filter((c) => c.isUser)
+  return dms.length > 0 ? dms : cards
+}
+
+function getActiveCard(): ChatCard | undefined {
+  const list = getVisibleCards()
+  if (list.length === 0) return undefined
+  if (chatIdx >= list.length) chatIdx = 0
+  return list[chatIdx]
+}
 
 function formatBadge(count: number): string {
   if (count <= 0) return ''
@@ -102,18 +117,19 @@ function buildScreenText(): string {
     return `PULSEGLANCE G2 // ERROR\n\n${wrapText(statusNote, 46, 2)}\n\n[Click] Retry`
   }
 
-  const card = cards[chatIdx]
+  const list = getVisibleCards()
+  const card = getActiveCard()
   if (!card) {
     return 'PULSEGLANCE G2\n\nNo active chats found.\n\n[Long Press] Refresh'
   }
 
   if (mode === 'RECORDING') {
-    const liveHint = speechTranscript ? `\nHeard: "${speechTranscript.slice(-42)}"` : '\nSpeak your reply into G2 mic...'
+    const liveHint = speechTranscript ? `\nHeard: "${speechTranscript.slice(-42)}"` : '\nSpeak reply (auto-translates to chat lang)...'
     return `PULSEGLANCE G2 // VOICE INPUT\nTo: ${card.title.slice(0, 28)}${liveHint}\n\n[Click] Done & AI Draft  [2x] Cancel`
   }
 
   if (mode === 'TRANSCRIBING') {
-    return `PULSEGLANCE G2 // AI VOICE\n\nTranscribing & crafting reply...\nTo: ${card.title.slice(0, 28)}`
+    return `PULSEGLANCE G2 // AI VOICE\n\nTranscribing & matching chat language...\nTo: ${card.title.slice(0, 28)}`
   }
 
   if (mode === 'SENDING') {
@@ -130,7 +146,8 @@ function buildScreenText(): string {
     return `REPLY -> ${card.title.slice(0, 22)} [${replyIdx + 1}/${total}]\n\n${wrapText(replyText, 46, 2)}\n\n[Scroll] Next [Click] Send [Hold] Voice`
   }
 
-  const header = `[${chatIdx + 1}/${cards.length}] ${card.title.slice(0, 25)}${formatBadge(card.unreadCount)}`
+  const tag = card.isUser ? 'DM' : 'CH'
+  const header = `[${chatIdx + 1}/${list.length} ${tag}] ${card.title.slice(0, 21)}${formatBadge(card.unreadCount)}`
   const body = wrapText(card.summary, 46, 3)
   return `${header}\n${body}\n[Scroll] Next [Click] Reply [Hold] Voice`
 }
@@ -139,7 +156,8 @@ function renderCompanion(): void {
   const root = document.getElementById('app')
   if (!root) return
 
-  const card = cards[chatIdx]
+  const list = getVisibleCards()
+  const card = getActiveCard()
   const activeReply = card?.replies[replyIdx] || ''
 
   root.innerHTML = `
@@ -147,7 +165,7 @@ function renderCompanion(): void {
       <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #173023;padding-bottom:10px;margin-bottom:14px;">
         <div>
           <div style="font-size:15px;font-weight:700;letter-spacing:0.6px;color:#4ade80;">PULSEGLANCE G2</div>
-          <div style="font-size:11px;color:#6ee7b7;opacity:0.75;">Even Realities G2 • Live Telegram & AI HUD</div>
+          <div style="font-size:11px;color:#6ee7b7;opacity:0.75;">Even Realities G2 • Live Telegram & AI Voice HUD</div>
         </div>
         <span style="font-size:11px;padding:4px 9px;border-radius:999px;background:#132a1e;color:#4ade80;border:1px solid #22543d;">
           ${mode}
@@ -159,7 +177,7 @@ function renderCompanion(): void {
       ${
         card
           ? `<div style="font-size:12px;color:#a7f3d0;margin-bottom:12px;">
-              <div style="opacity:0.7;margin-bottom:4px;">Active Chat (${chatIdx + 1}/${cards.length}): <strong>${card.title}</strong>${formatBadge(card.unreadCount)}</div>
+              <div style="opacity:0.7;margin-bottom:4px;">Active (${chatIdx + 1}/${list.length} •${card.isUser ? 'Personal DM' : 'Group/Channel'}): <strong>${card.title}</strong>${formatBadge(card.unreadCount)}</div>
               <div style="background:#0f1c16;padding:10px;border-radius:8px;border:1px solid #1a3326;">${card.summary}</div>
             </div>
             <div style="font-size:12px;color:#a7f3d0;margin-bottom:12px;">
@@ -172,17 +190,20 @@ function renderCompanion(): void {
       ${
         lastVoiceTranscript
           ? `<div style="font-size:11px;color:#86efac;background:#0e2218;padding:8px 10px;border-radius:8px;margin-bottom:12px;">
-              Last Voice Input: "${lastVoiceTranscript}"
+              Spoken Input: "${lastVoiceTranscript}"
             </div>`
           : ''
       }
 
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
         <button id="btn-voice" style="flex:1;padding:9px 12px;border-radius:8px;border:1px solid #2f6f4e;background:#143323;color:#4ade80;font-family:inherit;font-size:12px;cursor:pointer;">
-          ${mode === 'RECORDING' ? 'Stop & AI Draft' : 'Voice Reply (Hold Sim)'}
+          ${mode === 'RECORDING' ? 'Stop & AI Translate/Draft' : 'Voice Reply (Hold Sim)'}
+        </button>
+        <button id="btn-filter" style="padding:9px 12px;border-radius:8px;border:1px solid #244735;background:#0f1c16;color:#6ee7b7;font-family:inherit;font-size:12px;cursor:pointer;">
+          ${dmOnly ? 'Filter: DMs Only' : 'Filter: All Chats'}
         </button>
         <button id="btn-refresh" style="padding:9px 12px;border-radius:8px;border:1px solid #244735;background:#0f1c16;color:#a7f3d0;font-family:inherit;font-size:12px;cursor:pointer;">
-          Sync TG
+          Sync
         </button>
       </div>
     </div>
@@ -194,6 +215,13 @@ function renderCompanion(): void {
     } else {
       void startVoiceRecording()
     }
+  })
+
+  document.getElementById('btn-filter')?.addEventListener('click', () => {
+    dmOnly = !dmOnly
+    chatIdx = 0
+    replyIdx = 0
+    void render()
   })
 
   document.getElementById('btn-refresh')?.addEventListener('click', () => {
@@ -258,7 +286,7 @@ async function loadDigest(): Promise<void> {
 }
 
 async function startVoiceRecording(): Promise<void> {
-  if (!cards[chatIdx]) return
+  if (!getActiveCard()) return
   pcmChunks = []
   speechTranscript = ''
   mode = 'RECORDING'
@@ -267,7 +295,7 @@ async function startVoiceRecording(): Promise<void> {
   try {
     await bridge.audioControl(true, AudioInputSource.Glasses)
   } catch {
-    // Simulator without physical glasses mic continues with browser speech fallback
+    // Simulator fallback
   }
 
   const SpeechRec = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
@@ -326,7 +354,7 @@ async function finishVoiceRecording(): Promise<void> {
     speechRecognition = null
   }
 
-  const card = cards[chatIdx]
+  const card = getActiveCard()
   if (!card) {
     mode = 'FEED'
     await render()
@@ -370,7 +398,7 @@ async function finishVoiceRecording(): Promise<void> {
 }
 
 async function sendSelectedReply(): Promise<void> {
-  const card = cards[chatIdx]
+  const card = getActiveCard()
   const text = card?.replies[replyIdx]
   if (!card || !text) return
 
@@ -420,21 +448,23 @@ bridge.onEvenHubEvent(async (event: EvenHubEvent) => {
     return
   }
 
+  const list = getVisibleCards()
+
   if (mode === 'FEED') {
-    if (type === OsEventTypeList.SCROLL_TOP_EVENT && cards.length > 0) {
-      chatIdx = (chatIdx - 1 + cards.length) % cards.length
+    if (type === OsEventTypeList.SCROLL_TOP_EVENT && list.length > 0) {
+      chatIdx = (chatIdx - 1 + list.length) % list.length
       replyIdx = 0
       await render()
-    } else if (type === OsEventTypeList.SCROLL_BOTTOM_EVENT && cards.length > 0) {
-      chatIdx = (chatIdx + 1) % cards.length
+    } else if (type === OsEventTypeList.SCROLL_BOTTOM_EVENT && list.length > 0) {
+      chatIdx = (chatIdx + 1) % list.length
       replyIdx = 0
       await render()
-    } else if ((type === OsEventTypeList.CLICK_EVENT || type === undefined) && cards.length > 0) {
+    } else if ((type === OsEventTypeList.CLICK_EVENT || type === undefined) && list.length > 0) {
       replyIdx = 0
       mode = 'REPLY'
       await render()
     } else if (type === OsEventTypeList.LONG_PRESS_EVENT) {
-      if (cards.length > 0) {
+      if (list.length > 0) {
         await startVoiceRecording()
       } else {
         await loadDigest()
@@ -446,7 +476,8 @@ bridge.onEvenHubEvent(async (event: EvenHubEvent) => {
   }
 
   if (mode === 'REPLY') {
-    const repliesLen = cards[chatIdx]?.replies.length || 1
+    const active = getActiveCard()
+    const repliesLen = active?.replies.length || 1
     if (type === OsEventTypeList.SCROLL_TOP_EVENT) {
       replyIdx = (replyIdx - 1 + repliesLen) % repliesLen
       await render()
