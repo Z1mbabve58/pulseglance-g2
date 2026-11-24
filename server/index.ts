@@ -240,19 +240,29 @@ app.get('/api/digest', async (_req, res) => {
             const messages = allMsgs
               .map((m: any) => {
                 const raw = (m.message || '').trim()
-                const txt = raw || (m.media ? '[Media / Voice / Sticker]' : '')
+                const hasImage = Boolean(m.photo || m.media?.photo || m.media?.className === 'MessageMediaPhoto')
+                const txt = raw || (hasImage ? '📷 Photo' : m.media ? '[Voice / Sticker / File]' : '')
                 if (!txt) return null
+                const urlSet = new Set<string>()
+                const textMatches = raw.match(/https?:\/\/[^\s<>"')]+/g) || []
+                for (const u of textMatches) urlSet.add(u)
+                for (const ent of m.entities || []) {
+                  if (ent?.url) urlSet.add(String(ent.url))
+                }
                 let senderName = m.out ? 'Я' : title
                 if (!m.out && !isHumanDm(d) && m.sender) {
                   senderName = m.sender.firstName || m.sender.title || m.sender.username || title
                 }
                 return {
+                  id: Number(m.id || 0),
                   sender: senderName,
                   text: trimAtWord(txt, 240),
                   out: Boolean(m.out),
+                  hasImage,
+                  urls: Array.from(urlSet),
                 }
               })
-              .filter(Boolean) as { sender: string; text: string; out: boolean }[]
+              .filter(Boolean) as { id: number; sender: string; text: string; out: boolean; hasImage: boolean; urls: string[] }[]
 
             const recentLines = messages.slice(-6).map((m) => `${m.sender}: ${m.text}`)
             const lastMsgObj = allMsgs[allMsgs.length - 1] || d.message
@@ -285,6 +295,32 @@ app.get('/api/digest', async (_req, res) => {
   } catch (err: any) {
     console.error('Digest error:', err)
     res.status(500).json({ ok: false, error: err.message })
+  }
+})
+
+const mediaCache = new Map<string, Buffer>()
+
+app.get('/api/media/:chatId/:msgId', async (req, res) => {
+  try {
+    const { chatId, msgId } = req.params
+    const key = `${chatId}:${msgId}`
+    let buf = mediaCache.get(key)
+    if (!buf) {
+      const target = dialogEntities.get(String(chatId)) || chatId
+      const msgs = await client.getMessages(target, { ids: [Number(msgId)] })
+      const msg = msgs?.[0]
+      if (!msg) return res.status(404).send('Message not found')
+      const downloaded = await client.downloadMedia(msg, {})
+      if (!downloaded || !Buffer.isBuffer(downloaded)) return res.status(404).send('No media')
+      buf = downloaded
+      mediaCache.set(key, buf)
+    }
+    res.setHeader('Content-Type', 'image/jpeg')
+    res.setHeader('Cache-Control', 'public, max-age=3600')
+    res.send(buf)
+  } catch (err: any) {
+    console.error('Media download error:', err)
+    res.status(500).send(err.message)
   }
 })
 
