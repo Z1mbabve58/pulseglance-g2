@@ -182,11 +182,11 @@ app.use(express.json({ limit: '15mb' }))
 
 app.get('/api/digest', async (_req, res) => {
   try {
-    const dialogs = await client.getDialogs({ limit: 50 })
+    const dialogs = await client.getDialogs({ limit: 150 })
     const valid = dialogs.filter((d) => d.title && d.message?.message)
 
     const humanDms = valid
-      .filter((d) => d.isUser && !(d.entity as any)?.bot && !(d.entity as any)?.self)
+      .filter((d) => d.isUser && !(d.entity as any)?.bot)
       .slice(0, 5)
 
     const groupsAndChannels = valid
