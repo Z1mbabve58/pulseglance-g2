@@ -28,16 +28,50 @@ function trimAtWord(str: string, maxLen: number): string {
 
 function parseJsonBlock(raw: string): any {
   const cleaned = raw.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim()
-  return JSON.parse(cleaned)
+  const start = cleaned.indexOf('{')
+  const end = cleaned.lastIndexOf('}')
+  const jsonSlice = start !== -1 && end !== -1 ? cleaned.slice(start, end + 1) : cleaned
+  return JSON.parse(jsonSlice)
 }
 
-async function summarizeAndDraft(chatTitle: string, messagesText: string, latestText: string) {
-  const cleanLatest = latestText.replace(/\s+/g, ' ').trim()
-  const fallback = {
-    summary: trimAtWord(cleanLatest, 155),
-    fullDigest: trimAtWord(cleanLatest, 360),
-    replies: ['Ок, принял!', 'Сейчас посмотрю', 'На связи, скоро отвечу'],
+function buildSmartFallback(rawLatest: string, isOut: boolean) {
+  const text = rawLatest.replace(/^(Я|[^:]{1,28}):\s*/, '').replace(/\s+/g, ' ').trim()
+  const isRu = /[а-яА-ЯёЁ]/.test(text)
+  const isQuestion = text.includes('?')
+  const hasLink = /https?:\/\//i.test(text)
+
+  const prefix = isOut ? (isRu ? 'Вы: ' : 'You: ') : ''
+  const summary = trimAtWord(`${prefix}${text}`, 155)
+  const fullDigest = trimAtWord(`${prefix}${text}`, 360)
+
+  let replies: string[]
+  if (isRu) {
+    if (isQuestion) {
+      replies = ['Да, всё верно!', 'Сейчас уточню и напишу', 'Давай обсудим чуть позже']
+    } else if (hasLink) {
+      replies = ['Спасибо, сейчас открою!', 'Гляну ссылку и отпишусь', 'Принял, изучаю']
+    } else if (isOut) {
+      replies = ['Есть апдейт по этому?', 'На связи, если что пиши', 'Жду твоего ответа']
+    } else {
+      replies = ['Понял, спасибо за инфу!', 'Супер, принято', 'Сейчас посмотрю и отвечу']
+    }
+  } else {
+    if (isQuestion) {
+      replies = ['Yes, sounds good!', 'Let me check and get back to you', 'Can we discuss shortly?']
+    } else if (hasLink) {
+      replies = ['Thanks, checking the link now!', 'Got it, taking a look', 'Saved, will review soon']
+    } else if (isOut) {
+      replies = ['Any update on this?', 'Following up when you are free', 'Let me know your thoughts']
+    } else {
+      replies = ['Got it, thanks for the update!', 'Sounds great, on it', 'Will review and reply shortly']
+    }
   }
+
+  return { summary, fullDigest, replies }
+}
+
+async function summarizeAndDraft(chatTitle: string, messagesText: string, latestText: string, isOut: boolean) {
+  const fallback = buildSmartFallback(latestText, isOut)
   if (!openrouterKey) return fallback
 
   try {
@@ -49,21 +83,26 @@ async function summarizeAndDraft(chatTitle: string, messagesText: string, latest
       },
       body: JSON.stringify({
         model: 'google/gemini-2.0-flash-001',
+        response_format: { type: 'json_object' },
         messages: [
           {
             role: 'system',
             content:
-              'You summarize the NEWEST Telegram messages for Even G2 smart glasses. Messages are ordered oldest to newest and labeled with sender ("Я" = user, otherwise contact name). Focus primarily on the LATEST message(s), especially what the contact wrote. Never cut words mid-way. Return ONLY valid JSON: {"hudSummary":"complete 1-2 short sentences max 150 chars in the language of the latest message","fullDigest":"complete full summary of the latest messages max 340 chars","replies":["complete reply 1 max 45 chars","complete reply 2 max 45 chars","complete reply 3 max 45 chars"]}.',
+              'You summarize the NEWEST Telegram messages for Even G2 smart glasses. Messages are ordered oldest to newest ("Я" = user, otherwise contact name). Focus on the LATEST message(s). Never cut words mid-way. Return ONLY valid JSON: {"hudSummary":"complete 1-2 short sentences max 150 chars in the language of the latest message","fullDigest":"complete summary of latest messages max 340 chars","replies":["specific reply 1 max 45 chars","specific reply 2 max 45 chars","specific reply 3 max 45 chars"]}.',
           },
           {
             role: 'user',
-            content: `Chat: ${chatTitle}\nChronological messages (oldest -> newest):\n${messagesText}\n\nNewest message:\n${latestText}`,
+            content: `Chat: ${chatTitle}\nMessages (oldest -> newest):\n${messagesText}\n\nNewest message:\n${latestText}`,
           },
         ],
-        temperature: 0.25,
+        temperature: 0.3,
       }),
     })
     const data: any = await res.json()
+    if (!res.ok || data?.error) {
+      console.error(`[AI ERROR] HTTP ${res.status}:`, data?.error?.message || JSON.stringify(data))
+      return fallback
+    }
     const parsed = parseJsonBlock(data?.choices?.[0]?.message?.content || '')
     if (parsed?.hudSummary && Array.isArray(parsed?.replies) && parsed.replies.length > 0) {
       return {
@@ -72,8 +111,8 @@ async function summarizeAndDraft(chatTitle: string, messagesText: string, latest
         replies: parsed.replies.slice(0, 3).map((r: any) => trimAtWord(String(r), 55)),
       }
     }
-  } catch (err) {
-    console.error('AI digest error:', err)
+  } catch (err: any) {
+    console.error('[AI EXCEPTION]:', err?.message || err)
   }
   return fallback
 }
@@ -169,55 +208,66 @@ app.get('/api/digest', async (_req, res) => {
     const humanDms = dialogs
       .filter((d) => isHumanDm(d) && d.message)
       .sort(sortByUnreadAndNewest)
-      .slice(0, 15)
+      .slice(0, 5)
 
     const groups = dialogs
       .filter((d) => !isHumanDm(d) && isMainFolder(d) && d.message)
       .sort(sortByUnreadAndNewest)
-      .slice(0, 4)
+      .slice(0, 10)
 
-    const cards = []
-    for (const d of [...humanDms, ...groups]) {
-      try {
-        const id = String(d.id)
-        const title = getTitle(d)
-        if (d.entity) dialogEntities.set(id, d.entity)
+    const selected = [...humanDms, ...groups]
+    const cards: any[] = []
 
-        const fetched = await client.getMessages(d.inputEntity || d.entity || d.id, { limit: 6 })
-        const allMsgs = [...fetched]
-        if (d.message && !allMsgs.some((m) => m.id === d.message?.id)) {
-          allMsgs.push(d.message)
-        }
-        allMsgs.sort((a: any, b: any) => (a.date || 0) - (b.date || 0))
+    for (let i = 0; i < selected.length; i += 5) {
+      const batch = selected.slice(i, i + 5)
+      const results = await Promise.all(
+        batch.map(async (d) => {
+          try {
+            const id = String(d.id)
+            const title = getTitle(d)
+            if (d.entity) dialogEntities.set(id, d.entity)
 
-        const formattedLines = allMsgs
-          .map((m: any) => {
-            const txt = (m.message || '').trim()
-            if (!txt) return ''
-            const sender = m.out ? 'Я' : title
-            return `${sender}: ${txt}`
-          })
-          .filter(Boolean)
+            const fetched = await client.getMessages(d.inputEntity || d.entity || d.id, { limit: 6 })
+            const allMsgs = [...fetched]
+            if (d.message && !allMsgs.some((m) => m.id === d.message?.id)) {
+              allMsgs.push(d.message)
+            }
+            allMsgs.sort((a: any, b: any) => (a.date || 0) - (b.date || 0))
 
-        const latestLine =
-          formattedLines[formattedLines.length - 1] ||
-          (d.message?.message ? `${d.message.out ? 'Я' : title}: ${d.message.message}` : '[Media / Voice]')
+            const formattedLines = allMsgs
+              .map((m: any) => {
+                const txt = (m.message || '').trim()
+                if (!txt) return ''
+                const sender = m.out ? 'Я' : title
+                return `${sender}: ${txt}`
+              })
+              .filter(Boolean)
 
-        const textBlock = formattedLines.length > 0 ? formattedLines.join('\n') : latestLine
-        const ai = await summarizeAndDraft(title, textBlock, latestLine)
+            const lastMsgObj = allMsgs[allMsgs.length - 1] || d.message
+            const isOut = Boolean(lastMsgObj?.out)
+            const latestLine =
+              formattedLines[formattedLines.length - 1] ||
+              (d.message?.message ? `${isOut ? 'Я' : title}: ${d.message.message}` : '[Media / Voice]')
 
-        cards.push({
-          id,
-          title,
-          isUser: isHumanDm(d),
-          unreadCount: d.unreadCount || 0,
-          summary: ai.summary,
-          fullDigest: ai.fullDigest,
-          replies: ai.replies,
+            const textBlock = formattedLines.length > 0 ? formattedLines.join('\n') : latestLine
+            const ai = await summarizeAndDraft(title, textBlock, latestLine, isOut)
+
+            return {
+              id,
+              title,
+              isUser: isHumanDm(d),
+              unreadCount: d.unreadCount || 0,
+              summary: ai.summary,
+              fullDigest: ai.fullDigest,
+              replies: ai.replies,
+            }
+          } catch (itemErr) {
+            console.error('Skip dialog due to error:', itemErr)
+            return null
+          }
         })
-      } catch (itemErr) {
-        console.error('Skip dialog due to error:', itemErr)
-      }
+      )
+      cards.push(...results.filter(Boolean))
     }
 
     res.json({ ok: true, cards })
