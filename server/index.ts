@@ -11,11 +11,8 @@ const apiHash = process.env.TG_API_HASH || ''
 const openrouterKey = process.env.OPENROUTER_API_KEY || ''
 const port = Number(process.env.PORT) || 3001
 
-const SESSION_FILE = '.tg_session'
-const savedSession = fs.existsSync(SESSION_FILE) ? fs.readFileSync(SESSION_FILE, 'utf-8').trim() : ''
-const stringSession = new sessions.StringSession(savedSession)
-
-const client = new TelegramClient(stringSession, apiId, apiHash, {
+const savedSession = fs.existsSync('.tg_session') ? fs.readFileSync('.tg_session', 'utf-8').trim() : ''
+const client = new TelegramClient(new sessions.StringSession(savedSession), apiId, apiHash, {
   connectionRetries: 5,
 })
 
@@ -31,7 +28,6 @@ async function summarizeAndDraft(chatTitle: string, messagesText: string) {
     summary: messagesText.slice(0, 120).replace(/\n+/g, ' '),
     replies: ['Ок, принял!', 'Сейчас посмотрю', 'На связи, скоро отвечу'],
   }
-
   if (!openrouterKey) return fallback
 
   try {
@@ -49,18 +45,13 @@ async function summarizeAndDraft(chatTitle: string, messagesText: string) {
             content:
               'You summarize Telegram messages for Even G2 smart glasses (576x288 HUD). Return ONLY valid JSON: {"summary":"max 115 chars concise summary in the chat language","replies":["reply 1 max 42 chars","reply 2 max 42 chars","reply 3 max 42 chars"]}.',
           },
-          {
-            role: 'user',
-            content: `Chat: ${chatTitle}\nRecent messages:\n${messagesText}`,
-          },
+          { role: 'user', content: `Chat: ${chatTitle}\nRecent messages:\n${messagesText}` },
         ],
         temperature: 0.3,
       }),
     })
-
     const data: any = await res.json()
-    const content = data?.choices?.[0]?.message?.content || ''
-    const parsed = parseJsonBlock(content)
+    const parsed = parseJsonBlock(data?.choices?.[0]?.message?.content || '')
     if (parsed?.summary && Array.isArray(parsed?.replies) && parsed.replies.length > 0) {
       return {
         summary: String(parsed.summary).slice(0, 130),
@@ -70,40 +61,30 @@ async function summarizeAndDraft(chatTitle: string, messagesText: string) {
   } catch (err) {
     console.error('AI digest error:', err)
   }
-
   return fallback
 }
 
-async function processVoiceReply(
-  chatTitle: string,
-  summary: string,
-  audioBase64?: string,
-  transcriptHint?: string
-) {
+async function processVoiceReply(chatTitle: string, summary: string, audioBase64?: string, transcriptHint?: string) {
   const hintClean = (transcriptHint || '').trim()
-
   if (!openrouterKey) {
     const text = hintClean || 'Ок, понял, скоро вернусь с ответом!'
     return { transcript: text, reply: text }
   }
 
-  const languageInstruction = `Detect the language of the chat context ("${summary}"). Transcribe the user's voice input (which may be spoken in Russian or English), clean up filler words, and format a concise, natural Telegram reply (max 110 chars) IN THE SAME LANGUAGE AS THE CHAT CONTEXT (automatically translate Russian speech into natural English if the chat context is in English). Return ONLY valid JSON: {"transcript":"original spoken phrase","reply":"final reply in chat language"}.`
+  const langPrompt = `Detect the language of the chat context ("${summary}"). Transcribe the user's voice input (Russian or English), clean filler words, and write a concise natural Telegram reply (max 110 chars) IN THE SAME LANGUAGE AS THE CHAT CONTEXT (translate Russian speech to natural English if the chat is in English). Return ONLY JSON: {"transcript":"spoken","reply":"final reply"}.`
 
   if (audioBase64 && audioBase64.length > 100) {
     try {
       const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${openrouterKey}`,
-          'Content-Type': 'application/json',
-        },
+        headers: { Authorization: `Bearer ${openrouterKey}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: 'google/gemini-2.0-flash-001',
           messages: [
             {
               role: 'user',
               content: [
-                { type: 'text', text: `Chat: "${chatTitle}". ${languageInstruction}` },
+                { type: 'text', text: `Chat: "${chatTitle}". ${langPrompt}` },
                 { type: 'input_audio', input_audio: { data: audioBase64, format: 'wav' } },
               ],
             },
@@ -111,15 +92,10 @@ async function processVoiceReply(
           temperature: 0.2,
         }),
       })
-
       const data: any = await res.json()
-      const content = data?.choices?.[0]?.message?.content || ''
-      const parsed = parseJsonBlock(content)
+      const parsed = parseJsonBlock(data?.choices?.[0]?.message?.content || '')
       if (parsed?.reply) {
-        return {
-          transcript: String(parsed.transcript || parsed.reply),
-          reply: String(parsed.reply).slice(0, 120),
-        }
+        return { transcript: String(parsed.transcript || parsed.reply), reply: String(parsed.reply).slice(0, 120) }
       }
     } catch (err) {
       console.error('AI audio error:', err)
@@ -130,33 +106,25 @@ async function processVoiceReply(
     try {
       const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${openrouterKey}`,
-          'Content-Type': 'application/json',
-        },
+        headers: { Authorization: `Bearer ${openrouterKey}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: 'google/gemini-2.0-flash-001',
           messages: [
             {
               role: 'system',
               content:
-                'Detect the language of the chat context. Convert the user voice transcript into a clean, natural Telegram reply (max 110 chars) IN THE SAME LANGUAGE AS THE CHAT CONTEXT (translate Russian to natural English if the chat context is English). Return ONLY the final reply text.',
+                'Detect the language of the chat context. Convert the voice transcript into a natural Telegram reply (max 110 chars) IN THE SAME LANGUAGE AS THE CHAT CONTEXT (translate Russian to English if the chat is in English). Return ONLY the final reply text.',
             },
-            {
-              role: 'user',
-              content: `Chat: ${chatTitle}\nChat context: ${summary}\nUser voice transcript: ${hintClean}`,
-            },
+            { role: 'user', content: `Chat: ${chatTitle}\nContext: ${summary}\nTranscript: ${hintClean}` },
           ],
           temperature: 0.2,
         }),
       })
       const data: any = await res.json()
       const polished = data?.choices?.[0]?.message?.content?.trim()
-      if (polished) {
-        return { transcript: hintClean, reply: polished.slice(0, 120) }
-      }
+      if (polished) return { transcript: hintClean, reply: polished.slice(0, 120) }
     } catch (err) {
-      console.error('AI text polish error:', err)
+      console.error('AI text error:', err)
     }
     return { transcript: hintClean, reply: hintClean.slice(0, 120) }
   }
@@ -171,44 +139,55 @@ app.use(express.json({ limit: '15mb' }))
 app.get('/api/digest', async (_req, res) => {
   try {
     const dialogs = await client.getDialogs({ limit: 200 })
-    const valid = dialogs.filter((d) => d.title && d.message)
+    const getTitle = (d: any) =>
+      (d.title || d.entity?.firstName || d.entity?.username || 'Direct Message').trim()
 
     const isHumanDm = (d: any) =>
       Boolean((d.isUser || d.entity?.className === 'User') && !d.entity?.bot)
 
-    const humanDms = valid.filter(isHumanDm).slice(0, 20)
-    const groupsAndChannels = valid.filter((d) => !isHumanDm(d)).slice(0, 5)
-    const selected = [...humanDms, ...groupsAndChannels]
+    const humanDms = dialogs
+      .filter((d) => isHumanDm(d) && d.message)
+      .sort((a, b) => (b.unreadCount || 0) - (a.unreadCount || 0))
+      .slice(0, 15)
 
-    const cards = await Promise.all(
-      selected.map(async (d) => {
+    const groups = dialogs
+      .filter((d) => !isHumanDm(d) && d.message)
+      .slice(0, 4)
+
+    console.log(
+      'DMs found:',
+      humanDms.map((d) => `${getTitle(d)} (unread: ${d.unreadCount || 0})`).join(', ')
+    )
+
+    const cards = []
+    for (const d of [...humanDms, ...groups]) {
+      try {
         const id = String(d.id)
+        const title = getTitle(d)
         if (d.entity) dialogEntities.set(id, d.entity)
 
-        const msgs = await client.getMessages(d.entity || d.id, { limit: 6 })
+        const msgs = await client.getMessages(d.entity || d.id, { limit: 5 })
         const textLines = msgs
           .reverse()
           .map((m) => (m.message || '').trim())
           .filter(Boolean)
 
-        const textBlock =
-          textLines.length > 0
-            ? textLines.join('\n')
-            : '[Media, voice note, sticker, or call]'
+        const textBlock = textLines.length > 0 ? textLines.join('\n') : '[Media / Voice / Sticker]'
+        const ai = await summarizeAndDraft(title, textBlock)
 
-        const ai = await summarizeAndDraft(d.title || 'Chat', textBlock)
-        return {
+        cards.push({
           id,
-          title: d.title || 'Chat',
+          title,
           isUser: isHumanDm(d),
           unreadCount: d.unreadCount || 0,
           summary: ai.summary,
           replies: ai.replies,
-        }
-      })
-    )
+        })
+      } catch (itemErr) {
+        console.error('Skip dialog due to error:', itemErr)
+      }
+    }
 
-    console.log(`Synced ${humanDms.length} DMs and ${groupsAndChannels.length} groups/channels`)
     res.json({ ok: true, cards })
   } catch (err: any) {
     console.error('Digest error:', err)
@@ -219,15 +198,9 @@ app.get('/api/digest', async (_req, res) => {
 app.post('/api/voice-reply', async (req, res) => {
   try {
     const { chatTitle, summary, audioBase64, transcriptHint } = req.body || {}
-    const result = await processVoiceReply(
-      chatTitle || 'Chat',
-      summary || '',
-      audioBase64,
-      transcriptHint
-    )
+    const result = await processVoiceReply(chatTitle || 'Chat', summary || '', audioBase64, transcriptHint)
     res.json({ ok: true, ...result })
   } catch (err: any) {
-    console.error('Voice reply error:', err)
     res.status(500).json({ ok: false, error: err.message })
   }
 })
@@ -235,23 +208,18 @@ app.post('/api/voice-reply', async (req, res) => {
 app.post('/api/send', async (req, res) => {
   try {
     const { chatId, text } = req.body
-    if (!chatId || !text) {
-      return res.status(400).json({ ok: false, error: 'Missing chatId or text' })
-    }
+    if (!chatId || !text) return res.status(400).json({ ok: false, error: 'Missing chatId or text' })
     const target = dialogEntities.get(String(chatId)) || chatId
     await client.sendMessage(target, { message: text })
     res.json({ ok: true })
   } catch (err: any) {
-    console.error('Send error:', err)
     res.status(500).json({ ok: false, error: err.message })
   }
 })
 
 async function start() {
   await client.connect()
-  app.listen(port, () => {
-    console.log(`PulseGlance G2 Backend running on http://localhost:${port}`)
-  })
+  app.listen(port, () => console.log(`PulseGlance G2 Backend running on http://localhost:${port}`))
 }
 
 start()
