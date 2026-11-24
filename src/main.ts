@@ -45,8 +45,11 @@ let chatIdx = 0
 let replyIdx = 0
 let msgScrollEnd = 0
 let statusNote = ''
-let lastVoiceTranscript = ''
+let sendingLabel = ''
 let pcmChunks: Uint8Array[] = []
+let mediaRecorder: MediaRecorder | null = null
+let mediaStream: MediaStream | null = null
+let recordedChunks: BlobPart[] = []
 let speechRecognition: any = null
 let speechTranscript = ''
 let pageCreated = false
@@ -66,16 +69,14 @@ function getActiveCard(): ChatCard | undefined {
 
 function resetChatCursor(): void {
   replyIdx = 0
-  const msgs = getActiveCard()?.messages || []
-  msgScrollEnd = msgs.length
+  msgScrollEnd = (getActiveCard()?.messages || []).length
 }
 
 function getHistoryWindow(card?: ChatCard): { start: number; end: number; total: number; slice: ChatMessage[] } {
   const msgs = card?.messages || []
   const total = msgs.length
   if (total === 0) return { start: 0, end: 0, total: 0, slice: [] }
-  const minEnd = Math.min(3, total)
-  const end = Math.min(total, Math.max(minEnd, msgScrollEnd || total))
+  const end = Math.min(total, Math.max(Math.min(3, total), msgScrollEnd || total))
   const start = Math.max(0, end - 3)
   return { start, end, total, slice: msgs.slice(start, end) }
 }
@@ -120,6 +121,18 @@ function encodeWavBase64(chunks: Uint8Array[], rate = 16000): string {
   return btoa(bin)
 }
 
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onloadend = () => {
+      const res = String(reader.result || '')
+      resolve(res.includes(',') ? res.split(',')[1] : '')
+    }
+    reader.onerror = reject
+    reader.readAsDataURL(blob)
+  })
+}
+
 function buildScreenText(): string {
   if (mode === 'LOADING') return 'PULSEGLANCE G2 // SYNCING\n\nFetching 5 DMs & 10 Groups...\nPlease wait a moment.'
   if (mode === 'ERROR') return `PULSEGLANCE G2 // ERROR\n\n${wrapText(statusNote, 48, 2)}\n\n[Click] Retry`
@@ -129,25 +142,18 @@ function buildScreenText(): string {
 
   if (mode === 'HISTORY') {
     const { start, end, total, slice } = getHistoryWindow(card)
-    if (total === 0) {
-      return `THREAD // ${card.title.slice(0, 26)}\n\n${wrapText(card.summary, 48, 3)}\n\n[Click] Reply [Hold] Voice [2x] Back`
-    }
+    if (total === 0) return `THREAD // ${card.title.slice(0, 26)}\n\n${wrapText(card.summary, 48, 3)}\n\n[Click] Reply [Hold] Voice [2x] Back`
     const header = `THREAD [${start + 1}-${end}/${total}] ${card.title.slice(0, 19)}`
-    const body = slice
-      .map((m) => {
-        const who = m.out ? 'Я' : m.sender.slice(0, 10)
-        return wrapText(`${who}: ${m.text}`, 48, 2)
-      })
-      .join('\n')
+    const body = slice.map((m) => wrapText(`${m.out ? 'Я' : m.sender.slice(0, 10)}: ${m.text}`, 48, 2)).join('\n')
     return `${header}\n${body}\n[Scroll] History [Click] Reply [Hold] Voice`
   }
 
   if (mode === 'RECORDING') {
-    const hint = speechTranscript ? `\nHeard: "${speechTranscript.slice(-42)}"` : '\nSpeak reply (auto-translates)...'
-    return `PULSEGLANCE G2 // VOICE INPUT\nTo: ${card.title.slice(0, 28)}${hint}\n\n[Click] Done & AI Draft  [2x] Cancel`
+    const hint = speechTranscript ? `\nHeard: "${speechTranscript.slice(-40)}"` : '\nRecording voice note (mic active)...'
+    return `PULSEGLANCE G2 // VOICE NOTE\nTo: ${card.title.slice(0, 28)}${hint}\n\n[Click] Send Audio  [2x] Cancel`
   }
   if (mode === 'TRANSCRIBING') return `PULSEGLANCE G2 // AI VOICE\n\nTranscribing & matching language...\nTo: ${card.title.slice(0, 28)}`
-  if (mode === 'SENDING') return `PULSEGLANCE G2 // SENDING\n\nTo: ${card.title.slice(0, 28)}\n"${(card.replies[replyIdx] || '').slice(0, 44)}"`
+  if (mode === 'SENDING') return `PULSEGLANCE G2 // SENDING\n\nTo: ${card.title.slice(0, 28)}\n${sendingLabel || 'Delivering message...'}`
   if (mode === 'SENT') return `PULSEGLANCE G2 // SENT ✓\n\nDelivered to ${card.title.slice(0, 28)}\nReturning to feed...`
   if (mode === 'REPLY') {
     const rep = card.replies[replyIdx] || 'Ок, принял!'
@@ -171,9 +177,7 @@ function renderCompanion(): void {
   const threadHtml = card && win.total > 0
     ? (card.messages || []).map((m, idx) => {
         const inHud = idx >= win.start && idx < win.end
-        return `<div data-msg-idx="${idx}" class="${inHud ? 'hud-active-msg' : ''}" style="padding:8px 10px;border-radius:9px;margin-bottom:6px;border:1px solid ${
-          inHud ? '#2e6f4e' : '#152b20'
-        };background:${m.out ? (inHud ? '#123323' : '#0c2217') : (inHud ? '#0e2419' : '#08130e')};color:#d1fae5;font-size:12px;line-height:1.45;">
+        return `<div class="${inHud ? 'hud-active-msg' : ''}" style="padding:8px 10px;border-radius:9px;margin-bottom:6px;border:1px solid ${inHud ? '#2e6f4e' : '#152b20'};background:${m.out ? (inHud ? '#123323' : '#0c2217') : (inHud ? '#0e2419' : '#08130e')};color:#d1fae5;font-size:12px;line-height:1.45;">
           <div style="display:flex;justify-content:space-between;font-size:10px;color:${m.out ? '#4ade80' : '#6ee7b7'};margin-bottom:2px;font-weight:700;">
             <span>${esc(m.sender)}</span>
             ${inHud ? '<span style="opacity:0.8;">ON HUD</span>' : ''}
@@ -187,7 +191,7 @@ function renderCompanion(): void {
     ? card.replies.map((rep, idx) => {
         const act = idx === replyIdx
         return `<div data-reply-idx="${idx}" class="reply-pill" style="padding:9px 12px;border-radius:10px;border:1px solid ${act ? '#34d399' : '#183326'};background:${act ? '#123524' : '#0a1510'};color:${act ? '#ecfdf5' : '#86efac'};font-size:12px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;">
-          <span>${idx === 0 && lastVoiceTranscript ? '🎙 ' : ''}${esc(rep)}</span>
+          <span>${esc(rep)}</span>
           <span style="font-size:10px;opacity:0.75;padding:2px 6px;border-radius:6px;background:#07110c;">${act ? 'SELECTED' : `#${idx + 1}`}</span>
         </div>`
       }).join('')
@@ -222,13 +226,19 @@ function renderCompanion(): void {
           </div>
         </div>
 
+        ${isRec ? `
+        <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:8px;margin-bottom:14px;">
+          <button id="btn-voice-send" style="padding:10px 8px;border-radius:10px;border:1px solid #34d399;background:#10b981;color:#03150d;font-family:inherit;font-size:12px;font-weight:800;cursor:pointer;">🎙 Send Voice Note ↵</button>
+          <button id="btn-voice-text" style="padding:10px 8px;border-radius:10px;border:1px solid #2f6f4e;background:#133323;color:#86efac;font-family:inherit;font-size:11.5px;font-weight:700;cursor:pointer;">📝 To Text</button>
+          <button id="btn-voice-cancel" style="padding:10px 8px;border-radius:10px;border:1px solid #ef4444;background:#451212;color:#fca5a5;font-family:inherit;font-size:11.5px;font-weight:700;cursor:pointer;">✕ Cancel</button>
+        </div>` : `
         <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-bottom:14px;">
           <button id="btn-prev" style="padding:9px 4px;border-radius:10px;border:1px solid #234735;background:#0e1d16;color:#a7f3d0;font-family:inherit;font-size:11.5px;font-weight:600;cursor:pointer;">◀ Chat</button>
           <button id="btn-next" style="padding:9px 4px;border-radius:10px;border:1px solid #234735;background:#0e1d16;color:#a7f3d0;font-family:inherit;font-size:11.5px;font-weight:600;cursor:pointer;">Chat ▶</button>
           <button id="btn-hist" style="padding:9px 4px;border-radius:10px;border:1px solid ${mode === 'HISTORY' ? '#34d399' : '#234735'};background:${mode === 'HISTORY' ? '#143826' : '#0e1d16'};color:#ecfdf5;font-family:inherit;font-size:11.5px;font-weight:700;cursor:pointer;">${mode === 'HISTORY' ? '✨ Digest' : '📖 Thread'}</button>
-          <button id="btn-voice" style="padding:9px 4px;border-radius:10px;border:1px solid ${isRec ? '#ef4444' : '#2f6f4e'};background:${isRec ? '#451212' : '#133323'};color:${isRec ? '#fca5a5' : '#4ade80'};font-family:inherit;font-size:11.5px;font-weight:700;cursor:pointer;">${isRec ? '⏹ Stop' : '🎙 Voice'}</button>
+          <button id="btn-voice" style="padding:9px 4px;border-radius:10px;border:1px solid #2f6f4e;background:#133323;color:#4ade80;font-family:inherit;font-size:11.5px;font-weight:700;cursor:pointer;">🎙 Voice</button>
           <button id="btn-send" style="padding:9px 4px;border-radius:10px;border:1px solid #34d399;background:#10b981;color:#03150d;font-family:inherit;font-size:11.5px;font-weight:800;cursor:pointer;">Send ↵</button>
-        </div>
+        </div>`}
 
         ${card ? `<div style="margin-bottom:12px;">
           <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:#6ee7b7;margin-bottom:6px;">
@@ -242,10 +252,8 @@ function renderCompanion(): void {
         </div>
         <div style="margin-bottom:12px;display:flex;flex-direction:column;gap:6px;">${repliesHtml}</div>` : ''}
 
-        ${lastVoiceTranscript ? `<div style="font-size:11px;color:#86efac;background:#0c2217;border:1px solid #1e4632;padding:8px 12px;border-radius:9px;margin-bottom:12px;">🎙 Spoken: "${esc(lastVoiceTranscript)}"</div>` : ''}
-
         <div style="display:flex;justify-content:space-between;align-items:center;border-top:1px solid #162e22;padding-top:10px;">
-          <span style="font-size:10.5px;color:#6ee7b7;opacity:0.65;">Tab • ←/→ Chats • ↑/↓ Scroll • H Thread • Space Voice • Enter Send</span>
+          <span style="font-size:10.5px;color:#6ee7b7;opacity:0.65;">Tab • ←/→ Chats • ↑/↓ Scroll • Space Voice Note • Enter Send</span>
           <button id="btn-refresh" style="padding:6px 12px;border-radius:8px;border:1px solid #244735;background:#0f1c16;color:#a7f3d0;font-family:inherit;font-size:11px;font-weight:600;cursor:pointer;">↻ Sync</button>
         </div>
       </div>
@@ -253,9 +261,7 @@ function renderCompanion(): void {
 
   const threadBox = document.getElementById('thread-box')
   const activeEl = threadBox?.querySelector('.hud-active-msg') as HTMLElement | null
-  if (threadBox && activeEl) {
-    threadBox.scrollTop = Math.max(0, activeEl.offsetTop - threadBox.offsetTop - 8)
-  }
+  if (threadBox && activeEl) threadBox.scrollTop = Math.max(0, activeEl.offsetTop - threadBox.offsetTop - 8)
 
   document.getElementById('tab-dms')?.addEventListener('click', () => { activeTab = 'DMS'; chatIdx = 0; resetChatCursor(); if (mode !== 'RECORDING') mode = 'FEED'; void render() })
   document.getElementById('tab-groups')?.addEventListener('click', () => { activeTab = 'GROUPS'; chatIdx = 0; resetChatCursor(); if (mode !== 'RECORDING') mode = 'FEED'; void render() })
@@ -264,19 +270,20 @@ function renderCompanion(): void {
   document.getElementById('btn-hist')?.addEventListener('click', () => { mode = mode === 'HISTORY' ? 'FEED' : 'HISTORY'; void render() })
   document.getElementById('btn-msg-up')?.addEventListener('click', () => { scrollHistory(-1) })
   document.getElementById('btn-msg-down')?.addEventListener('click', () => { scrollHistory(1) })
-  document.getElementById('btn-voice')?.addEventListener('click', () => { if (mode === 'RECORDING') void finishVoiceRecording(); else void startVoiceRecording() })
+  document.getElementById('btn-voice')?.addEventListener('click', () => { void startVoiceRecording() })
+  document.getElementById('btn-voice-send')?.addEventListener('click', () => { void finishVoiceRecording(true) })
+  document.getElementById('btn-voice-text')?.addEventListener('click', () => { void finishVoiceRecording(false) })
+  document.getElementById('btn-voice-cancel')?.addEventListener('click', () => { void cancelVoiceRecording() })
   document.getElementById('btn-send')?.addEventListener('click', () => { void sendSelectedReply() })
   document.querySelectorAll('.reply-pill').forEach((el) => el.addEventListener('click', () => { replyIdx = Number((el as HTMLElement).dataset.replyIdx || 0); mode = 'REPLY'; void render() }))
   document.getElementById('btn-refresh')?.addEventListener('click', () => { void loadDigest() })
 }
 
 function scrollHistory(delta: number): void {
-  const card = getActiveCard()
-  const msgs = card?.messages || []
+  const msgs = getActiveCard()?.messages || []
   if (!msgs.length) return
   const minEnd = Math.min(3, msgs.length)
-  const cur = msgScrollEnd || msgs.length
-  msgScrollEnd = Math.max(minEnd, Math.min(msgs.length, cur + delta))
+  msgScrollEnd = Math.max(minEnd, Math.min(msgs.length, (msgScrollEnd || msgs.length) + delta))
   if (mode !== 'RECORDING') mode = 'HISTORY'
   void render()
 }
@@ -301,26 +308,56 @@ async function render(): Promise<void> {
 }
 
 async function loadDigest(): Promise<void> {
-  mode = 'LOADING'
-  await render()
+  mode = 'LOADING'; await render()
   try {
     const res = await fetch(`${BACKEND_URL}/api/digest`)
     const data = await res.json()
     if (!data.ok) throw new Error(data.error || 'Failed to sync')
     cards = data.cards || []
     chatIdx = 0; resetChatCursor(); mode = 'FEED'
-  } catch (err: any) {
-    statusNote = err?.message || 'Backend unreachable'
-    mode = 'ERROR'
-  }
+  } catch (err: any) { statusNote = err?.message || 'Backend unreachable'; mode = 'ERROR' }
   await render()
+}
+
+function stopMediaCapture(): Promise<Blob | null> {
+  return new Promise((resolve) => {
+    const rec = mediaRecorder
+    mediaRecorder = null
+    const cleanup = () => {
+      mediaStream?.getTracks().forEach((t) => t.stop())
+      mediaStream = null
+    }
+    if (!rec || rec.state === 'inactive') {
+      cleanup()
+      resolve(recordedChunks.length ? new Blob(recordedChunks, { type: 'audio/ogg' }) : null)
+      return
+    }
+    rec.onstop = () => {
+      const mime = rec.mimeType || 'audio/webm'
+      const blob = recordedChunks.length ? new Blob(recordedChunks, { type: mime }) : null
+      cleanup()
+      resolve(blob)
+    }
+    try { rec.stop() } catch { cleanup(); resolve(null) }
+  })
 }
 
 async function startVoiceRecording(): Promise<void> {
   if (!getActiveCard()) return
-  pcmChunks = []; speechTranscript = ''; mode = 'RECORDING'
+  pcmChunks = []; recordedChunks = []; speechTranscript = ''; mode = 'RECORDING'
   await render()
   try { await bridge?.audioControl(true, AudioInputSource.Glasses) } catch {}
+
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : ''
+    mediaRecorder = mimeType ? new MediaRecorder(mediaStream, { mimeType }) : new MediaRecorder(mediaStream)
+    mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) recordedChunks.push(e.data) }
+    mediaRecorder.start(200)
+  } catch (err) {
+    console.warn('Browser mic capture unavailable:', err)
+  }
+
   const SpeechRec = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
   if (SpeechRec) {
     try {
@@ -339,19 +376,54 @@ async function startVoiceRecording(): Promise<void> {
 async function cancelVoiceRecording(): Promise<void> {
   try { await bridge?.audioControl(false) } catch {}
   try { speechRecognition?.stop() } catch {}
-  speechRecognition = null; pcmChunks = []; mode = 'FEED'
+  speechRecognition = null
+  await stopMediaCapture()
+  pcmChunks = []; recordedChunks = []; mode = 'FEED'
   await render()
 }
 
-async function finishVoiceRecording(): Promise<void> {
+async function finishVoiceRecording(sendAsAudio = true): Promise<void> {
   try { await bridge?.audioControl(false) } catch {}
   try { speechRecognition?.stop() } catch {}
   speechRecognition = null
+  const blob = await stopMediaCapture()
   const card = getActiveCard()
   if (!card) { mode = 'FEED'; await render(); return }
+
+  let audioBase64 = ''
+  let mimeType = 'audio/ogg'
+  if (pcmChunks.length > 0) {
+    audioBase64 = encodeWavBase64(pcmChunks, 16000)
+    mimeType = 'audio/wav'
+  } else if (blob && blob.size > 0) {
+    audioBase64 = await blobToBase64(blob)
+    mimeType = blob.type || 'audio/webm'
+  }
+  pcmChunks = []; recordedChunks = []
+
+  if (sendAsAudio) {
+    if (!audioBase64) {
+      statusNote = 'No audio captured — allow microphone in Chrome'
+      mode = 'ERROR'; await render(); return
+    }
+    sendingLabel = 'Sending real voice message...'
+    mode = 'SENDING'; await render()
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/send-voice`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chatId: card.id, audioBase64, mimeType }),
+      })
+      const data = await res.json()
+      if (!data.ok) throw new Error(data.error || 'Voice note send failed')
+      mode = 'SENT'; await render()
+      await new Promise((r) => setTimeout(r, 1200))
+      mode = 'FEED'
+    } catch (err: any) { statusNote = err?.message || 'Voice send error'; mode = 'ERROR' }
+    await render()
+    return
+  }
+
   mode = 'TRANSCRIBING'; await render()
-  const audioBase64 = encodeWavBase64(pcmChunks, 16000)
-  pcmChunks = []
   try {
     const res = await fetch(`${BACKEND_URL}/api/voice-reply`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -359,7 +431,6 @@ async function finishVoiceRecording(): Promise<void> {
     })
     const data = await res.json()
     if (data?.ok && data?.reply) {
-      lastVoiceTranscript = data.transcript || data.reply
       card.replies = [data.reply, ...card.replies.slice(0, 2)]
       replyIdx = 0; mode = 'REPLY'
     } else { statusNote = data?.error || 'Voice AI failed'; mode = 'ERROR' }
@@ -371,6 +442,7 @@ async function sendSelectedReply(): Promise<void> {
   const card = getActiveCard()
   const text = card?.replies[replyIdx]
   if (!card || !text) return
+  sendingLabel = `"${text.slice(0, 42)}"`
   mode = 'SENDING'; await render()
   try {
     const res = await fetch(`${BACKEND_URL}/api/send`, {
@@ -399,9 +471,9 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault()
     if (mode === 'REPLY' && active) { replyIdx = (replyIdx + 1) % (active.replies.length || 1); void render() }
     else scrollHistory(1)
-  } else if (e.key.toLowerCase() === 'h') { mode = mode === 'HISTORY' ? 'FEED' : 'HISTORY'; void render() }
-  else if (e.code === 'Space') { e.preventDefault(); if (mode === 'RECORDING') void finishVoiceRecording(); else void startVoiceRecording() }
-  else if (e.key === 'Enter') { e.preventDefault(); void sendSelectedReply() }
+  } else if (e.key === 'Escape' && mode === 'RECORDING') { e.preventDefault(); void cancelVoiceRecording() }
+  else if (e.code === 'Space') { e.preventDefault(); if (mode === 'RECORDING') void finishVoiceRecording(true); else void startVoiceRecording() }
+  else if (e.key === 'Enter') { e.preventDefault(); if (mode === 'RECORDING') void finishVoiceRecording(true); else void sendSelectedReply() }
 })
 
 bridge?.onEvenHubEvent(async (event: EvenHubEvent) => {
@@ -409,7 +481,7 @@ bridge?.onEvenHubEvent(async (event: EvenHubEvent) => {
   const type = event.textEvent?.eventType ?? event.sysEvent?.eventType
   if (mode === 'ERROR') { if (type === OsEventTypeList.CLICK_EVENT || type === undefined) await loadDigest(); return }
   if (mode === 'RECORDING') {
-    if (type === OsEventTypeList.CLICK_EVENT || type === undefined) await finishVoiceRecording()
+    if (type === OsEventTypeList.CLICK_EVENT || type === undefined) await finishVoiceRecording(true)
     else if (type === OsEventTypeList.DOUBLE_CLICK_EVENT) await cancelVoiceRecording()
     return
   }

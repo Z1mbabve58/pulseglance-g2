@@ -3,6 +3,10 @@ import cors from 'cors'
 import dotenv from 'dotenv'
 import fs from 'fs'
 import { TelegramClient, sessions } from 'telegram'
+import { CustomFile } from 'telegram/client/uploads'
+import { execFileSync } from 'child_process'
+import os from 'os'
+import path from 'path'
 
 dotenv.config()
 
@@ -60,12 +64,28 @@ function buildSmartFallback(rawLatest: string, isOut: boolean) {
   return { summary, fullDigest, replies }
 }
 
+const MODEL_CANDIDATES = ['google/gemini-2.5-flash', 'openai/gpt-4o-mini', 'openrouter/free']
+
+async function fetchOpenRouter(url: string, init: any): Promise<Response> {
+  const parsedBody = JSON.parse(init.body)
+  let lastRes!: Response
+  for (const model of MODEL_CANDIDATES) {
+    const res = await fetch(url, {
+      ...init,
+      body: JSON.stringify({ ...parsedBody, model }),
+    })
+    if (res.ok) return res
+    lastRes = res
+  }
+  return lastRes
+}
+
 async function summarizeAndDraft(chatTitle: string, messagesText: string, latestText: string, isOut: boolean) {
   const fallback = buildSmartFallback(latestText, isOut)
   if (!openrouterKey) return fallback
 
   try {
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    const res = await fetchOpenRouter('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${openrouterKey}`,
@@ -118,7 +138,7 @@ async function processVoiceReply(chatTitle: string, summary: string, audioBase64
 
   if (audioBase64 && audioBase64.length > 100) {
     try {
-      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      const res = await fetchOpenRouter('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
         headers: { Authorization: `Bearer ${openrouterKey}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -147,7 +167,7 @@ async function processVoiceReply(chatTitle: string, summary: string, audioBase64
 
   if (hintClean) {
     try {
-      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      const res = await fetchOpenRouter('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
         headers: { Authorization: `Bearer ${openrouterKey}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -274,6 +294,43 @@ app.post('/api/voice-reply', async (req, res) => {
     const result = await processVoiceReply(chatTitle || 'Chat', summary || '', audioBase64, transcriptHint)
     res.json({ ok: true, ...result })
   } catch (err: any) {
+    res.status(500).json({ ok: false, error: err.message })
+  }
+})
+
+
+app.post('/api/send-voice', async (req, res) => {
+  try {
+    const { chatId, audioBase64, mimeType } = req.body || {}
+    if (!chatId || !audioBase64) {
+      return res.status(400).json({ ok: false, error: 'Missing chatId or audioBase64' })
+    }
+    const target = dialogEntities.get(String(chatId)) || chatId
+    const rawBuf = Buffer.from(audioBase64, 'base64')
+    const isWav = String(mimeType || '').includes('wav')
+    let finalBuf = rawBuf
+    let fileName = isWav ? 'voice.wav' : 'voice.ogg'
+
+    try {
+      const tmpIn = path.join(os.tmpdir(), `pg2_in_${Date.now()}.${isWav ? 'wav' : 'webm'}`)
+      const tmpOut = path.join(os.tmpdir(), `pg2_out_${Date.now()}.ogg`)
+      fs.writeFileSync(tmpIn, rawBuf)
+      execFileSync('ffmpeg', ['-y', '-i', tmpIn, '-c:a', 'libopus', '-b:a', '32k', tmpOut], { stdio: 'ignore' })
+      finalBuf = fs.readFileSync(tmpOut)
+      fileName = 'voice.ogg'
+      fs.unlinkSync(tmpIn)
+      fs.unlinkSync(tmpOut)
+    } catch {
+      // Fallback to raw buffer if ffmpeg is not installed
+    }
+
+    await client.sendFile(target, {
+      file: new CustomFile(fileName, finalBuf.length, '', finalBuf),
+      voiceNote: true,
+    })
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('Send voice error:', err)
     res.status(500).json({ ok: false, error: err.message })
   }
 })
