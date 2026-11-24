@@ -145,6 +145,7 @@ export class Glasses3DViewer {
   private lastText = ''
   private lastImageUrl = ''
   private lastFullImage = false
+  private lastVisorMode: 'DND' | 'AMBIENT' | 'OPEN' = 'OPEN'
   private imgCache = new Map<string, HTMLImageElement>()
   private imgLoading = new Set<string>()
   private raycaster = new THREE.Raycaster()
@@ -218,7 +219,7 @@ export class Glasses3DViewer {
       metalness: 0.55,
       roughness: 0.34,
       emissive: HUD_THEMES[0].hex,
-      emissiveIntensity: 0.14,
+      emissiveIntensity: this.lastVisorMode === 'DND' ? 0.03 : 0.14,
     })
     this.hudMat = new THREE.MeshBasicMaterial({
       map: this.lensTex,
@@ -655,9 +656,7 @@ export class Glasses3DViewer {
     this.colorBtn.style.borderColor = t.css
     this.pulseMat.color.setHex(t.hex)
     for (const h of this.hotspotEls) h.el.style.borderColor = t.css
-    const prev = this.lastText
-    this.lastText = ''
-    this.updateScreen(prev, this.isRecording, this.lastImageUrl, this.lastFullImage)
+    this.redrawHud()
   }
 
   public toggleView(): void {
@@ -694,12 +693,19 @@ export class Glasses3DViewer {
     this.badgeEl.style.color = kind === 'HOLD' ? '#fca5a5' : '#ecfdf5'
   }
 
-  public updateScreen(text: string, recording: boolean, imageUrl = '', fullImage = false): void {
+  public updateScreen(
+    text: string,
+    recording: boolean,
+    imageUrl = '',
+    fullImage = false,
+    visorMode: 'DND' | 'AMBIENT' | 'OPEN' = 'OPEN'
+  ): void {
     if (
       text === this.lastText &&
       recording === this.isRecording &&
       imageUrl === this.lastImageUrl &&
-      fullImage === this.lastFullImage
+      fullImage === this.lastFullImage &&
+      visorMode === this.lastVisorMode
     ) {
       return
     }
@@ -707,8 +713,9 @@ export class Glasses3DViewer {
     this.isRecording = recording
     this.lastImageUrl = imageUrl
     this.lastFullImage = fullImage
+    this.lastVisorMode = visorMode
 
-    if (imageUrl && !this.imgCache.has(imageUrl) && !this.imgLoading.has(imageUrl)) {
+    if (visorMode === 'OPEN' && imageUrl && !this.imgCache.has(imageUrl) && !this.imgLoading.has(imageUrl)) {
       this.imgLoading.add(imageUrl)
       const fetchUrl = `${imageUrl}${imageUrl.includes('?') ? '&' : '?'}hud=1`
       fetch(fetchUrl, { mode: 'cors' })
@@ -720,7 +727,7 @@ export class Glasses3DViewer {
             URL.revokeObjectURL(objUrl)
             this.imgLoading.delete(imageUrl)
             this.imgCache.set(imageUrl, img)
-            if (this.lastImageUrl === imageUrl) this.redrawHud()
+            if (this.lastImageUrl === imageUrl && this.lastVisorMode === 'OPEN') this.redrawHud()
           }
           img.onerror = () => {
             URL.revokeObjectURL(objUrl)
@@ -728,9 +735,8 @@ export class Glasses3DViewer {
           }
           img.src = objUrl
         })
-        .catch((err) => {
+        .catch(() => {
           this.imgLoading.delete(imageUrl)
-          console.warn('[HUD Image Fetch Error]', err)
         })
     }
 
@@ -770,13 +776,12 @@ export class Glasses3DViewer {
 
     ctx.save()
     ctx.shadowBlur = 0
-    ctx.globalAlpha = 0.96
+    ctx.globalAlpha = 0.95
     ctx.drawImage(off, dx, dy, dw, dh)
-
-    const c = 14
+    const c = 11
     ctx.strokeStyle = fg
-    ctx.globalAlpha = 0.6
-    ctx.lineWidth = 2
+    ctx.globalAlpha = 0.55
+    ctx.lineWidth = 1.5
     ctx.beginPath()
     ctx.moveTo(dx, dy + c); ctx.lineTo(dx, dy); ctx.lineTo(dx + c, dy)
     ctx.moveTo(dx + dw - c, dy); ctx.lineTo(dx + dw, dy); ctx.lineTo(dx + dw, dy + c)
@@ -792,15 +797,48 @@ export class Glasses3DViewer {
 
     const W = 1024
     const H = 512
+    ctx.clearRect(0, 0, W, H)
+
+    // 1. DND: полная блокировка — абсолютно чистые линзы
+    if (this.lastVisorMode === 'DND') {
+      this.lensTex.needsUpdate = true
+      return
+    }
+
     const theme = HUD_THEMES[this.themeIdx]
     const fg = this.isRecording ? '#fca5a5' : theme.css
     const glow = this.isRecording ? '#ef4444' : theme.glow
     const ff = '-apple-system,BlinkMacSystemFont,"SF Pro Display","Inter","Segoe UI",sans-serif'
 
-    ctx.clearRect(0, 0, W, H)
+    // 2. AMBIENT: чистые линзы + только компактная верхняя строка уведомления (напр. "1  Имя")
+    if (this.lastVisorMode === 'AMBIENT') {
+      const notif = this.lastText.trim()
+      if (notif) {
+        ctx.save()
+        ctx.font = `600 16px ${ff}`
+        ctx.textBaseline = 'middle'
+        ctx.shadowColor = glow
+        ctx.shadowBlur = 10
+        const textW = ctx.measureText(notif).width
+        const startX = Math.round((W - (textW + 18)) / 2)
+        const cy = 66
 
-    const rad = ctx.createRadialGradient(W * 0.5, H * 0.48, 30, W * 0.5, H * 0.48, 410)
-    rad.addColorStop(0, this.isRecording ? 'rgba(239,68,68,0.10)' : 'rgba(74,222,128,0.05)')
+        ctx.fillStyle = fg
+        ctx.globalAlpha = 0.95
+        ctx.beginPath()
+        ctx.arc(startX + 4, cy, 4, 0, Math.PI * 2)
+        ctx.fill()
+
+        ctx.fillText(notif, startX + 16, cy)
+        ctx.restore()
+      }
+      this.lensTex.needsUpdate = true
+      return
+    }
+
+    // 3. OPEN: компактный мелкий шрифт в верхней части линзы
+    const rad = ctx.createRadialGradient(W * 0.5, H * 0.34, 24, W * 0.5, H * 0.34, 340)
+    rad.addColorStop(0, this.isRecording ? 'rgba(239,68,68,0.09)' : 'rgba(74,222,128,0.045)')
     rad.addColorStop(1, 'rgba(0,0,0,0)')
     ctx.fillStyle = rad
     ctx.fillRect(0, 0, W, H)
@@ -810,76 +848,76 @@ export class Glasses3DViewer {
     const footer = raw.length > 1 && raw[raw.length - 1].startsWith('[') ? raw[raw.length - 1] : ''
     const bodyRaw = raw.slice(1, footer ? -1 : undefined)
 
-    const sx = 128
+    const sx = 180
     const sw = W - sx * 2
     const loadedImg = this.lastImageUrl ? this.imgCache.get(this.lastImageUrl) : undefined
     const isLoadingImg = Boolean(this.lastImageUrl && !loadedImg && this.imgLoading.has(this.lastImageUrl))
 
     ctx.textBaseline = 'top'
     ctx.shadowColor = glow
-    ctx.shadowBlur = 10
+    ctx.shadowBlur = 8
     ctx.fillStyle = fg
     ctx.beginPath()
-    ctx.arc(sx + 6, 97, 4.5, 0, Math.PI * 2)
+    ctx.arc(sx + 4, 65, 3.5, 0, Math.PI * 2)
     ctx.fill()
 
-    ctx.font = `600 18px ${ff}`
-    ctx.globalAlpha = 0.88
-    ctx.fillText(header.slice(0, 56), sx + 20, 88)
+    ctx.font = `600 14px ${ff}`
+    ctx.globalAlpha = 0.86
+    ctx.fillText(header.slice(0, 62), sx + 15, 58)
 
     const lg = ctx.createLinearGradient(sx, 0, sx + sw, 0)
     lg.addColorStop(0, fg)
-    lg.addColorStop(0.85, fg)
+    lg.addColorStop(0.82, fg)
     lg.addColorStop(1, 'transparent')
     ctx.strokeStyle = lg
-    ctx.globalAlpha = 0.25
-    ctx.lineWidth = 1.5
+    ctx.globalAlpha = 0.22
+    ctx.lineWidth = 1.2
     ctx.beginPath()
-    ctx.moveTo(sx, 114)
-    ctx.lineTo(sx + sw, 114)
+    ctx.moveTo(sx, 78)
+    ctx.lineTo(sx + sw, 78)
     ctx.stroke()
 
     if (loadedImg && this.lastFullImage) {
-      this.drawOpticalPhoto(ctx, loadedImg, 165, 128, 694, 268, fg)
+      this.drawOpticalPhoto(ctx, loadedImg, 210, 90, 604, 218, fg)
     } else if (isLoadingImg && this.lastFullImage) {
       ctx.globalAlpha = 0.72
       ctx.fillStyle = fg
-      ctx.font = `500 20px ${ff}`
-      ctx.fillText('Loading photo to optical waveguide…', sx, 235)
+      ctx.font = `500 15px ${ff}`
+      ctx.fillText('Loading photo to optical waveguide…', sx, 160)
     } else if (loadedImg) {
-      const textW = 445
+      const textW = 395
       ctx.globalAlpha = 0.96
       ctx.fillStyle = fg
-      ctx.font = `500 20px ${ff}`
-      ctx.shadowBlur = 11
+      ctx.font = `500 15px ${ff}`
+      ctx.shadowBlur = 9
       const lines: string[] = []
       for (const p of bodyRaw) {
         for (const l of wrapPx(ctx, p, textW, 4)) {
           if (lines.length < 8) lines.push(l)
         }
       }
-      lines.forEach((l, i) => ctx.fillText(l, sx, 130 + i * 29))
-      this.drawOpticalPhoto(ctx, loadedImg, sx + textW + 24, 128, sw - textW - 24, 258, fg)
+      lines.forEach((l, i) => ctx.fillText(l, sx, 88 + i * 21))
+      this.drawOpticalPhoto(ctx, loadedImg, sx + textW + 20, 88, sw - textW - 20, 195, fg)
     } else {
       ctx.globalAlpha = 0.96
       ctx.fillStyle = fg
-      ctx.font = `500 22px ${ff}`
-      ctx.shadowBlur = 12
+      ctx.font = `500 16px ${ff}`
+      ctx.shadowBlur = 9
       const lines: string[] = []
       for (const p of bodyRaw) {
         for (const l of wrapPx(ctx, p, sw, 4)) {
-          if (lines.length < 8) lines.push(l)
+          if (lines.length < 9) lines.push(l)
         }
       }
-      lines.forEach((l, i) => ctx.fillText(l, sx, 130 + i * 31))
+      lines.forEach((l, i) => ctx.fillText(l, sx, 88 + i * 22))
     }
 
     if (footer) {
-      ctx.globalAlpha = 0.55
+      ctx.globalAlpha = 0.5
       ctx.fillStyle = fg
-      ctx.font = `500 15px ${ff}`
-      ctx.shadowBlur = 6
-      ctx.fillText(footer.replace(/\[/g, '').replace(/\]/g, ' ·').slice(0, 72), sx, 412)
+      ctx.font = `500 12.5px ${ff}`
+      ctx.shadowBlur = 5
+      ctx.fillText(footer.replace(/\[/g, '').replace(/\]/g, ' ·').slice(0, 78), sx, 318)
     }
 
     ctx.globalAlpha = 1
@@ -946,7 +984,7 @@ export class Glasses3DViewer {
     // Directional optical waveguide fade: visible only when looking from behind lenses (-Z)
     this.camera.getWorldDirection(this.camDir)
     const behindAlpha = THREE.MathUtils.smoothstep(this.camDir.z, 0.08, 0.52)
-    this.hudMat.opacity = behindAlpha * 0.98
+    this.hudMat.opacity = this.lastVisorMode === 'DND' ? 0 : behindAlpha * 0.98
 
     if (this.pulseMat.opacity > 0.01) {
       this.pulseRing.scale.multiplyScalar(1.06)
@@ -965,7 +1003,13 @@ export class Glasses3DViewer {
       : 0.14
 
     if (!flashing && !this.isRecording) {
-      if (behindAlpha > 0.35) {
+      if (this.lastVisorMode === 'DND') {
+        this.badgeEl.textContent = 'DND LOCKED • PURE GLASSES MODE'
+        this.badgeEl.style.color = '#64748b'
+      } else if (this.lastVisorMode === 'AMBIENT' && behindAlpha > 0.35) {
+        this.badgeEl.textContent = 'NOTIFY MODE • TOP GLANCE ONLY'
+        this.badgeEl.style.color = theme.css
+      } else if (behindAlpha > 0.35) {
         this.badgeEl.textContent = `WEARER POV • ${theme.name.toUpperCase()} WAVEGUIDE`
         this.badgeEl.style.color = theme.css
       } else if (this.foldProgress > 0.6) {

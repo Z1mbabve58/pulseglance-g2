@@ -59,6 +59,9 @@ try {
   bridge = null
 }
 
+type VisorMode = 'DND' | 'AMBIENT' | 'OPEN'
+let visorMode: VisorMode = 'OPEN'
+let ambientPing: { count: number; sender: string } | null = null
 let mode: ScreenMode = 'LOADING'
 let cards: ChatCard[] = []
 let activeTab: 'DMS' | 'GROUPS' = 'DMS'
@@ -248,10 +251,36 @@ function getHudImage(): { url: string; full: boolean } {
   return { url: '', full: false }
 }
 
+function getAmbientNotificationText(): string {
+  if (ambientPing) return `${ambientPing.count}  •  ${ambientPing.sender}`
+  const unread = cards.find((c) => c.unreadCount > 0)
+  if (unread) return `${unread.unreadCount}  •  ${unread.title.slice(0, 26)}`
+  return ''
+}
+
+function setVisorMode(next: VisorMode): void {
+  visorMode = next
+  if (next === 'OPEN') ambientPing = null
+  renderCompanion()
+}
+
+function triggerDemoNotification(): void {
+  if (visorMode === 'DND') return
+  const target = getActiveCard() || cards[0]
+  const sender = (target?.title || 'Alex').slice(0, 24)
+  const nextCount = ambientPing && ambientPing.sender === sender ? ambientPing.count + 1 : 1
+  ambientPing = { count: nextCount, sender }
+  visorMode = 'AMBIENT'
+  glasses3d?.triggerGesture('TAP')
+  renderCompanion()
+}
+
 function ensureGlasses3D(): Glasses3DViewer {
   if (glasses3d) return glasses3d
   glasses3d = new Glasses3DViewer({
     onTap: () => {
+      if (visorMode === 'DND') return
+      if (visorMode === 'AMBIENT') { setVisorMode('OPEN'); return }
       if (mode === 'ERROR') void loadDigest()
       else if (mode === 'RECORDING') void finishVoiceRecording(true)
       else if (mode === 'FEED') { resetChatCursor(); mode = 'HISTORY'; void render() }
@@ -260,6 +289,7 @@ function ensureGlasses3D(): Glasses3DViewer {
       else if (mode === 'REPLY') void sendSelectedReply()
     },
     onScroll: (dir) => {
+      if (visorMode !== 'OPEN') return
       const list = getVisibleCards()
       const active = getActiveCard()
       if (mode === 'FEED' && list.length) {
@@ -276,13 +306,17 @@ function ensureGlasses3D(): Glasses3DViewer {
       }
     },
     onHold: () => {
+      if (visorMode === 'DND') return
+      if (visorMode === 'AMBIENT') visorMode = 'OPEN'
       if (mode === 'RECORDING') void finishVoiceRecording(true)
       else void startVoiceRecording()
     },
     onBack: () => {
+      if (visorMode === 'DND') return
       if (mode === 'RECORDING') void cancelVoiceRecording()
       else if (mode === 'REPLY') { mode = 'HISTORY'; void render() }
       else if (mode === 'HISTORY' || mode === 'MEDIA') { mode = 'FEED'; void render() }
+      else if (visorMode === 'OPEN') setVisorMode('AMBIENT')
     },
     onMedia: () => {
       mode = mode === 'MEDIA' ? 'FEED' : 'MEDIA'
@@ -316,7 +350,13 @@ function renderCompanion(): void {
 
   const viewer = ensureGlasses3D()
   const hi = getHudImage()
-  viewer.updateScreen(buildScreenText(), mode === 'RECORDING', hi.url, hi.full)
+  if (visorMode === 'DND') {
+    viewer.updateScreen('', false, '', false, 'DND')
+  } else if (visorMode === 'AMBIENT') {
+    viewer.updateScreen(getAmbientNotificationText(), false, '', false, 'AMBIENT')
+  } else {
+    viewer.updateScreen(buildScreenText(), mode === 'RECORDING', hi.url, hi.full, 'OPEN')
+  }
 
   const dmCount = cards.filter((c) => Boolean(c.isUser)).length
   const grpCount = cards.filter((c) => !c.isUser).length
@@ -333,6 +373,12 @@ function renderCompanion(): void {
         <span style="font-size:14px;font-weight:800;letter-spacing:1px;color:#ecfdf5;">PULSEGLANCE <span style="color:#4ade80;">G2</span></span>
         <span style="font-size:10px;padding:2px 8px;border-radius:999px;background:#10251a;color:${stCol};border:1px solid #1f4b34;font-weight:700;">${mode}</span>
       </div>
+      <div style="display:flex;gap:4px;padding:3px;border-radius:10px;background:#08120d;border:1px solid #173023;">
+        <button id="visor-dnd" title="Полная блокировка — обычные очки [1]" style="padding:5px 9px;border-radius:7px;border:1px solid ${visorMode === 'DND' ? '#ef4444' : 'transparent'};background:${visorMode === 'DND' ? '#3a1414' : 'transparent'};color:${visorMode === 'DND' ? '#fecaca' : '#94a3b8'};font-family:inherit;font-size:11px;font-weight:700;cursor:pointer;">🔕 DND [1]</button>
+        <button id="visor-ambient" title="Только верхние уведомления (1 • Имя) [2]" style="padding:5px 9px;border-radius:7px;border:1px solid ${visorMode === 'AMBIENT' ? '#fbbf24' : 'transparent'};background:${visorMode === 'AMBIENT' ? '#2c220c' : 'transparent'};color:${visorMode === 'AMBIENT' ? '#fde68a' : '#94a3b8'};font-family:inherit;font-size:11px;font-weight:700;cursor:pointer;">🔔 Notify [2]</button>
+        <button id="visor-open" title="Разблокировать визор и сообщения [3]" style="padding:5px 9px;border-radius:7px;border:1px solid ${visorMode === 'OPEN' ? '#34d399' : 'transparent'};background:${visorMode === 'OPEN' ? '#123322' : 'transparent'};color:${visorMode === 'OPEN' ? '#ecfdf5' : '#94a3b8'};font-family:inherit;font-size:11px;font-weight:700;cursor:pointer;">👁 Visor [3]</button>
+        <button id="btn-ping" title="Имитировать входящее сообщение для демо [N]" style="padding:5px 8px;border-radius:7px;border:1px solid #224533;background:#0d2118;color:#6ee7b7;font-family:inherit;font-size:10.5px;font-weight:700;cursor:pointer;">⚡ Ping [N]</button>
+      </div>
       <div style="display:flex;gap:6px;padding:3px;border-radius:10px;background:#08120d;border:1px solid #173023;">
         <button id="tab-dms" style="padding:5px 12px;border-radius:7px;border:1px solid ${activeTab === 'DMS' ? '#34d399' : 'transparent'};background:${activeTab === 'DMS' ? '#123322' : 'transparent'};color:${activeTab === 'DMS' ? '#ecfdf5' : '#6ee7b7'};font-family:inherit;font-size:11.5px;font-weight:700;cursor:pointer;">👤 DMs (${dmCount})</button>
         <button id="tab-groups" style="padding:5px 12px;border-radius:7px;border:1px solid ${activeTab === 'GROUPS' ? '#34d399' : 'transparent'};background:${activeTab === 'GROUPS' ? '#123322' : 'transparent'};color:${activeTab === 'GROUPS' ? '#ecfdf5' : '#6ee7b7'};font-family:inherit;font-size:11.5px;font-weight:700;cursor:pointer;">👥 Groups (${grpCount})</button>
@@ -342,6 +388,10 @@ function renderCompanion(): void {
         <button id="btn-refresh" style="padding:5px 11px;border-radius:8px;border:1px solid #224533;background:#0c1b14;color:#a7f3d0;font-family:inherit;font-size:11px;font-weight:600;cursor:pointer;">↻ Sync</button>
       </div>`
 
+    document.getElementById('visor-dnd')?.addEventListener('click', () => setVisorMode('DND'))
+    document.getElementById('visor-ambient')?.addEventListener('click', () => setVisorMode('AMBIENT'))
+    document.getElementById('visor-open')?.addEventListener('click', () => setVisorMode('OPEN'))
+    document.getElementById('btn-ping')?.addEventListener('click', () => triggerDemoNotification())
     document.getElementById('tab-dms')?.addEventListener('click', () => {
       activeTab = 'DMS'; chatIdx = 0; resetChatCursor(); if (mode !== 'RECORDING') mode = 'FEED'; void render()
     })
@@ -574,7 +624,11 @@ window.addEventListener('keydown', (e) => {
     if (mode === 'REPLY' && active) { replyIdx = (replyIdx + 1) % (active.replies.length || 1); void render() }
     else if (mode === 'MEDIA') { const a = getChatAttachments(active); if (a.length) { mediaIdx = (mediaIdx + 1) % a.length; void render() } }
     else scrollHistory(1)
-  } else if (e.code === 'KeyV') { glasses3d?.toggleView() }
+  } else if (e.code === 'Digit1') { setVisorMode('DND') }
+  else if (e.code === 'Digit2') { setVisorMode('AMBIENT') }
+  else if (e.code === 'Digit3') { setVisorMode('OPEN') }
+  else if (e.code === 'KeyN') { triggerDemoNotification() }
+  else if (e.code === 'KeyV') { glasses3d?.toggleView() }
   else if (e.code === 'KeyC') { glasses3d?.cycleTheme() }
   else if (e.code === 'KeyM') { mode = mode === 'MEDIA' ? 'FEED' : 'MEDIA'; mediaIdx = 0; void render() }
   else if (e.code === 'KeyO') { openSelectedAttachment() }
