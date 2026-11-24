@@ -20,26 +20,41 @@ const HUD_THEMES = [
 interface HotspotDef {
   label: string
   hint: string
+  anchor: THREE.Object3D
   localPos: THREE.Vector3
   kind: GestureKind
   run: () => void
 }
 
-function pantoShape(sc = 1): THREE.Shape {
+function crownPantoShape(sc = 1): THREE.Shape {
   const s = new THREE.Shape()
-  const w = 1.18 * sc
-  const t = 0.86 * sc
-  const b = 0.96 * sc
-  s.moveTo(-w * 0.72, t)
-  s.bezierCurveTo(-w * 0.2, t * 1.08, w * 0.35, t * 1.06, w * 0.78, t * 0.92)
-  s.bezierCurveTo(w * 1.08, t * 0.78, w * 1.06, -b * 0.15, w * 0.84, -b * 0.68)
-  s.bezierCurveTo(w * 0.58, -b * 1.05, -w * 0.45, -b * 1.05, -w * 0.78, -b * 0.66)
-  s.bezierCurveTo(-w * 1.06, -b * 0.25, -w * 1.05, t * 0.75, -w * 0.72, t)
+  s.moveTo(-0.62 * sc, 0.85 * sc)
+  s.bezierCurveTo(-0.22 * sc, 0.90 * sc, 0.22 * sc, 0.90 * sc, 0.62 * sc, 0.85 * sc)
+  s.bezierCurveTo(0.95 * sc, 0.80 * sc, 1.12 * sc, 0.56 * sc, 1.10 * sc, 0.14 * sc)
+  s.bezierCurveTo(1.07 * sc, -0.52 * sc, 0.68 * sc, -0.96 * sc, 0.0, -0.97 * sc)
+  s.bezierCurveTo(-0.68 * sc, -0.96 * sc, -1.07 * sc, -0.52 * sc, -1.10 * sc, 0.14 * sc)
+  s.bezierCurveTo(-1.12 * sc, 0.56 * sc, -0.95 * sc, 0.80 * sc, -0.62 * sc, 0.85 * sc)
+  return s
+}
+
+function roundedRectShape(w: number, h: number, r: number): THREE.Shape {
+  const s = new THREE.Shape()
+  const hw = w / 2
+  const hh = h / 2
+  s.moveTo(-hw + r, -hh)
+  s.lineTo(hw - r, -hh)
+  s.quadraticCurveTo(hw, -hh, hw, -hh + r)
+  s.lineTo(hw, hh - r)
+  s.quadraticCurveTo(hw, hh, hw - r, hh)
+  s.lineTo(-hw + r, hh)
+  s.quadraticCurveTo(-hw, hh, -hw, hh - r)
+  s.lineTo(-hw, -hh + r)
+  s.quadraticCurveTo(-hw, -hh, -hw + r, -hh)
   return s
 }
 
 function lensGeo(): THREE.ShapeGeometry {
-  const g = new THREE.ShapeGeometry(pantoShape(0.92), 36)
+  const g = new THREE.ShapeGeometry(crownPantoShape(0.89), 40)
   g.computeBoundingBox()
   const bb = g.boundingBox!
   const p = g.attributes.position
@@ -53,6 +68,21 @@ function lensGeo(): THREE.ShapeGeometry {
   }
   uv.needsUpdate = true
   return g
+}
+
+function createTempleLabelTex(text: string): THREE.CanvasTexture {
+  const c = document.createElement('canvas')
+  c.width = 512
+  c.height = 64
+  const ctx = c.getContext('2d')!
+  ctx.clearRect(0, 0, 512, 64)
+  ctx.fillStyle = 'rgba(215, 224, 220, 0.42)'
+  ctx.font = '600 22px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(text, 24, 34)
+  const tex = new THREE.CanvasTexture(c)
+  tex.colorSpace = THREE.SRGBColorSpace
+  return tex
 }
 
 function wrapPx(ctx: CanvasRenderingContext2D, text: string, maxW: number, maxL: number): string[] {
@@ -79,10 +109,12 @@ function wrapPx(ctx: CanvasRenderingContext2D, text: string, maxW: number, maxL:
 export class Glasses3DViewer {
   public readonly domElement: HTMLDivElement
   private scene = new THREE.Scene()
-  private camera = new THREE.PerspectiveCamera(40, 580 / 345, 0.1, 50)
+  private camera = new THREE.PerspectiveCamera(36, 580 / 350, 0.1, 60)
   private renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
   private controls: OrbitControls
   private glassesGroup = new THREE.Group()
+  private leftPivot = new THREE.Group()
+  private rightPivot = new THREE.Group()
   private sensorMat: THREE.MeshStandardMaterial
   private hudMat: THREE.MeshBasicMaterial
   private pulseRing: THREE.Mesh
@@ -98,9 +130,12 @@ export class Glasses3DViewer {
   private showPins = true
   private viewIdx = 0
   private themeIdx = 0
+  private foldProgress = 1
+  private targetFold = 1
   private cameraAnimating = false
-  private desiredCamPos = new THREE.Vector3(0, 0.16, -4.65)
-  private desiredTarget = new THREE.Vector3(0, 0.02, 0.1)
+  private desiredCamPos = new THREE.Vector3(0, 0.04, 6.25)
+  private desiredTarget = new THREE.Vector3(0, -0.04, -0.1)
+  private zoomKeyDir = 0
   private flashUntil = 0
   private isRecording = false
   private hoveringTemple = false
@@ -112,23 +147,24 @@ export class Glasses3DViewer {
   private holdFired = false
   private camDir = new THREE.Vector3()
   private projVec = new THREE.Vector3()
+  private zoomOffset = new THREE.Vector3()
 
   constructor(cb: GlassesCallbacks) {
     this.domElement = document.createElement('div')
     this.domElement.style.cssText =
-      'position:relative;width:100%;height:345px;border-radius:16px;overflow:hidden;border:1px solid #1d4230;background:radial-gradient(circle at 22% 28%,rgba(16,65,48,0.34) 0%,transparent 48%),radial-gradient(circle at 78% 68%,rgba(15,45,62,0.32) 0%,transparent 52%),radial-gradient(circle at 50% 45%,#08140f 0%,#020504 88%);cursor:grab;user-select:none;'
+      'position:relative;width:100%;height:350px;border-radius:16px;overflow:hidden;border:1px solid #1d4230;background:radial-gradient(circle at 22% 25%,rgba(18,70,52,0.34) 0%,transparent 50%),radial-gradient(circle at 78% 72%,rgba(16,46,64,0.30) 0%,transparent 52%),radial-gradient(circle at 50% 45%,#0b1713 0%,#030605 88%);cursor:grab;user-select:none;'
 
     this.camera.position.copy(this.desiredCamPos)
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
-    this.renderer.setSize(580, 345)
+    this.renderer.setSize(580, 350)
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping
-    this.renderer.toneMappingExposure = 1.25
+    this.renderer.toneMappingExposure = 1.28
     this.renderer.domElement.style.cssText = 'width:100%;height:100%;display:block;'
     this.domElement.appendChild(this.renderer.domElement)
 
     new ResizeObserver(() => {
       const w = this.domElement.clientWidth || 580
-      const h = this.domElement.clientHeight || 345
+      const h = this.domElement.clientHeight || 350
       this.camera.aspect = w / h
       this.camera.updateProjectionMatrix()
       this.renderer.setSize(w, h, false)
@@ -140,23 +176,28 @@ export class Glasses3DViewer {
     this.controls.enablePan = false
     this.controls.enableZoom = true
     this.controls.zoomSpeed = 0.85
-    this.controls.minDistance = 1.2
-    this.controls.maxDistance = 8.5
+    this.controls.minDistance = 1.15
+    this.controls.maxDistance = 9.0
     this.controls.target.copy(this.desiredTarget)
+
+    // Unfold temples smoothly the moment the user starts rotating the 3D glasses
     this.controls.addEventListener('start', () => {
       this.cameraAnimating = false
+      if (this.targetFold > 0.5) {
+        this.targetFold = 0
+      }
     })
 
-    this.scene.add(new THREE.AmbientLight(0xdbeafe, 0.85))
-    const k1 = new THREE.DirectionalLight(0xffffff, 2.1)
-    k1.position.set(3, 4, 5)
-    this.scene.add(k1)
-    const k2 = new THREE.DirectionalLight(0xcffafe, 1.35)
-    k2.position.set(-2.5, 2.5, -5)
-    this.scene.add(k2)
-    const k3 = new THREE.DirectionalLight(0x34d399, 1.1)
-    k3.position.set(4, -1, -3)
-    this.scene.add(k3)
+    this.scene.add(new THREE.AmbientLight(0xe2e8f0, 1.05))
+    const key = new THREE.DirectionalLight(0xffffff, 2.2)
+    key.position.set(2.5, 4.5, 6)
+    this.scene.add(key)
+    const fill = new THREE.DirectionalLight(0xcffafe, 1.4)
+    fill.position.set(-3, 2, -5.5)
+    this.scene.add(fill)
+    const rim = new THREE.DirectionalLight(0x34d399, 0.95)
+    rim.position.set(4, -2, -3)
+    this.scene.add(rim)
 
     this.lensCanvas.width = 1024
     this.lensCanvas.height = 512
@@ -165,16 +206,16 @@ export class Glasses3DViewer {
     this.lensTex.anisotropy = 4
 
     this.sensorMat = new THREE.MeshStandardMaterial({
-      color: 0x3b4842,
-      metalness: 0.78,
-      roughness: 0.22,
+      color: 0x6b7270,
+      metalness: 0.55,
+      roughness: 0.34,
       emissive: HUD_THEMES[0].hex,
-      emissiveIntensity: 0.3,
+      emissiveIntensity: 0.14,
     })
     this.hudMat = new THREE.MeshBasicMaterial({
       map: this.lensTex,
       transparent: true,
-      opacity: 0.96,
+      opacity: 0,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       side: THREE.FrontSide,
@@ -195,13 +236,31 @@ export class Glasses3DViewer {
 
     this.hotspotLayer.style.cssText = 'position:absolute;inset:0;pointer-events:none;overflow:hidden;'
     this.badgeEl.style.cssText =
-      'position:absolute;top:10px;left:12px;padding:4px 10px;border-radius:999px;background:rgba(4,12,9,0.78);border:1px solid #24573e;color:#6ee7b7;font-size:10px;font-weight:700;pointer-events:none;'
-    this.badgeEl.textContent = 'WEARER POV • WAVEGUIDE ACTIVE'
+      'position:absolute;top:10px;left:12px;padding:4px 10px;border-radius:999px;background:rgba(4,12,9,0.8);border:1px solid #24573e;color:#94a3b8;font-size:10px;font-weight:700;pointer-events:none;'
+    this.badgeEl.textContent = 'EVEN G2 FOLDED • DRAG TO UNFOLD & ORBIT'
 
     const topR = document.createElement('div')
-    topR.style.cssText = 'position:absolute;top:9px;right:10px;display:flex;gap:5px;z-index:5;'
+    topR.style.cssText = 'position:absolute;top:9px;right:10px;display:flex;gap:4px;z-index:5;'
     const bCss =
-      'padding:4px 8px;border-radius:8px;border:1px solid #285640;background:rgba(8,22,16,0.85);color:#ecfdf5;font-family:inherit;font-size:10px;font-weight:700;cursor:pointer;'
+      'padding:4px 7px;border-radius:8px;border:1px solid #285640;background:rgba(8,22,16,0.86);color:#ecfdf5;font-family:inherit;font-size:10px;font-weight:700;cursor:pointer;'
+
+    const zInBtn = document.createElement('button')
+    zInBtn.style.cssText = bCss
+    zInBtn.title = 'Zoom In (+)'
+    zInBtn.textContent = '＋'
+    zInBtn.onclick = (e) => {
+      e.stopPropagation()
+      this.zoomBy(-0.75)
+    }
+
+    const zOutBtn = document.createElement('button')
+    zOutBtn.style.cssText = bCss
+    zOutBtn.title = 'Zoom Out (-)'
+    zOutBtn.textContent = '－'
+    zOutBtn.onclick = (e) => {
+      e.stopPropagation()
+      this.zoomBy(0.75)
+    }
 
     this.colorBtn.style.cssText = bCss
     this.colorBtn.textContent = '🎨 Green [C]'
@@ -211,28 +270,29 @@ export class Glasses3DViewer {
     }
 
     this.pinsBtn.style.cssText = bCss
-    this.pinsBtn.textContent = '🎯 Controls'
+    this.pinsBtn.textContent = '🎯'
+    this.pinsBtn.title = 'Toggle Temple Controls'
     this.pinsBtn.onclick = (e) => {
       e.stopPropagation()
       this.showPins = !this.showPins
-      this.pinsBtn.style.opacity = this.showPins ? '1' : '0.5'
+      this.pinsBtn.style.opacity = this.showPins ? '1' : '0.45'
       this.hotspotLayer.style.display = this.showPins ? 'block' : 'none'
     }
 
     this.viewBtn.style.cssText = bCss
-    this.viewBtn.textContent = '🔍 Close-Up [V]'
+    this.viewBtn.textContent = '👁 Wearer POV [V]'
     this.viewBtn.onclick = (e) => {
       e.stopPropagation()
       this.toggleView()
     }
 
-    topR.append(this.colorBtn, this.pinsBtn, this.viewBtn)
+    topR.append(zInBtn, zOutBtn, this.colorBtn, this.pinsBtn, this.viewBtn)
 
     const hint = document.createElement('div')
     hint.style.cssText =
       'position:absolute;bottom:8px;left:12px;right:12px;display:flex;justify-content:space-between;font-size:9.5px;color:#94a3b8;opacity:0.8;pointer-events:none;'
     hint.innerHTML =
-      '<span>Click temple switches • Drag to orbit front/back • Wheel: Zoom</span><span>Optical Micro-LED Waveguide</span>'
+      '<span>Drag: Unfold & Orbit • +/- Keys: Zoom • V: POV • F: Fold</span><span>Even G2 Optical Waveguide</span>'
 
     this.domElement.append(this.hotspotLayer, this.badgeEl, topR, hint)
 
@@ -242,31 +302,142 @@ export class Glasses3DViewer {
     this.animate()
   }
 
-  private buildFrame(): void {
-    const fMat = new THREE.MeshStandardMaterial({ color: 0x222726, metalness: 0.38, roughness: 0.44 })
-    const pMat = new THREE.MeshStandardMaterial({ color: 0x181d1c, metalness: 0.25, roughness: 0.52 })
-    const gMat = new THREE.MeshPhysicalMaterial({
-      color: 0x0c1b18,
+  private buildTempleMesh(side: -1 | 1, frameMat: THREE.Material, podMat: THREE.Material): THREE.Group {
+    const pivot = new THREE.Group()
+    pivot.position.set(side * 2.54, 0.34, -0.09)
+
+    // Sculpted side-profile temple arm (straight front + smooth downward bend behind ear)
+    const armShape = new THREE.Shape()
+    armShape.moveTo(0, 0.115)
+    armShape.lineTo(2.15, 0.115)
+    armShape.quadraticCurveTo(2.68, 0.11, 3.12, -0.10)
+    armShape.lineTo(3.72, -0.38)
+    armShape.lineTo(3.64, -0.54)
+    armShape.lineTo(3.02, -0.25)
+    armShape.quadraticCurveTo(2.60, -0.07, 2.12, -0.075)
+    armShape.lineTo(0, -0.075)
+    armShape.closePath()
+
+    const armGeo = new THREE.ExtrudeGeometry(armShape, {
+      depth: 0.085,
+      bevelEnabled: true,
+      bevelThickness: 0.014,
+      bevelSize: 0.012,
+      bevelSegments: 3,
+    })
+    armGeo.translate(0, 0, -0.0425)
+    const armMesh = new THREE.Mesh(armGeo, frameMat)
+    armMesh.rotation.y = Math.PI / 2
+    pivot.add(armMesh)
+    this.templeTargets.push(armMesh)
+
+    // Subtle touch sensor strip along outer temple
+    const touchStrip = new THREE.Mesh(new THREE.BoxGeometry(0.025, 0.055, 1.35), this.sensorMat)
+    touchStrip.position.set(side * 0.058, 0.02, -0.92)
+    pivot.add(touchStrip)
+    this.templeTargets.push(touchStrip)
+
+    // Inner temple inscription visible through lenses when folded
+    const labelTex = createTempleLabelTex(side === -1 ? 'Even G2   Mod.01' : 'Designed by Even Realities')
+    const labelMat = new THREE.MeshBasicMaterial({
+      map: labelTex,
       transparent: true,
-      opacity: 0.26,
-      roughness: 0.06,
+      opacity: 0.9,
+      depthWrite: false,
+    })
+    const labelPlane = new THREE.Mesh(new THREE.PlaneGeometry(1.55, 0.18), labelMat)
+    labelPlane.position.set(-side * 0.06, 0.02, -1.15)
+    labelPlane.rotation.y = side === -1 ? Math.PI / 2 : -Math.PI / 2
+    pivot.add(labelPlane)
+
+    // Signature Even G2 flat rounded battery/audio pod at temple tip
+    const podShape = roundedRectShape(1.56, 0.44, 0.18)
+    const podGeo = new THREE.ExtrudeGeometry(podShape, {
+      depth: 0.125,
+      bevelEnabled: true,
+      bevelThickness: 0.032,
+      bevelSize: 0.028,
+      bevelSegments: 4,
+    })
+    podGeo.translate(0, 0, -0.0625)
+    const podHolder = new THREE.Group()
+    podHolder.position.set(0, -0.60, -4.18)
+    podHolder.rotation.y = Math.PI / 2
+    const podMesh = new THREE.Mesh(podGeo, podMat)
+    podMesh.rotation.z = -0.39
+    podHolder.add(podMesh)
+    pivot.add(podHolder)
+    this.templeTargets.push(podMesh)
+
+    return pivot
+  }
+
+  private buildFrame(): void {
+    const fMat = new THREE.MeshStandardMaterial({ color: 0x2c3130, metalness: 0.28, roughness: 0.48 })
+    const pMat = new THREE.MeshStandardMaterial({ color: 0x232726, metalness: 0.22, roughness: 0.56 })
+    const padMat = new THREE.MeshPhysicalMaterial({
+      color: 0xd1d5db,
+      transparent: true,
+      opacity: 0.45,
+      roughness: 0.15,
+    })
+    const gMat = new THREE.MeshPhysicalMaterial({
+      color: 0x10221c,
+      transparent: true,
+      opacity: 0.22,
+      roughness: 0.05,
       metalness: 0.08,
       side: THREE.DoubleSide,
     })
 
-    const outer = pantoShape(1)
-    outer.holes.push(pantoShape(0.91))
+    const outer = crownPantoShape(1.0)
+    outer.holes.push(crownPantoShape(0.875))
     const rimGeo = new THREE.ExtrudeGeometry(outer, {
-      depth: 0.13,
+      depth: 0.12,
       bevelEnabled: true,
-      bevelThickness: 0.024,
-      bevelSize: 0.022,
+      bevelThickness: 0.026,
+      bevelSize: 0.024,
       bevelSegments: 4,
     })
     rimGeo.center()
     const lGeo = lensGeo()
 
-    for (const side of [-1, 1]) {
+    // Sleek sculpted keyhole bridge
+    const bridgeShape = new THREE.Shape()
+    bridgeShape.moveTo(-0.42, 0.46)
+    bridgeShape.quadraticCurveTo(0, 0.52, 0.42, 0.46)
+    bridgeShape.lineTo(0.42, 0.26)
+    bridgeShape.quadraticCurveTo(0, 0.34, -0.42, 0.26)
+    bridgeShape.closePath()
+    const bridgeGeo = new THREE.ExtrudeGeometry(bridgeShape, {
+      depth: 0.11,
+      bevelEnabled: true,
+      bevelThickness: 0.022,
+      bevelSize: 0.02,
+      bevelSegments: 3,
+    })
+    bridgeGeo.translate(0, 0, -0.055)
+    this.glassesGroup.add(new THREE.Mesh(bridgeGeo, fMat))
+
+    // Endpiece lugs + flush metallic grey hinge inlays
+    const lugGeo = new THREE.ExtrudeGeometry(roundedRectShape(0.48, 0.28, 0.08), {
+      depth: 0.12,
+      bevelEnabled: true,
+      bevelThickness: 0.022,
+      bevelSize: 0.018,
+      bevelSegments: 3,
+    })
+    lugGeo.translate(0, 0, -0.06)
+
+    const inlayGeo = new THREE.ExtrudeGeometry(roundedRectShape(0.29, 0.155, 0.035), {
+      depth: 0.02,
+      bevelEnabled: true,
+      bevelThickness: 0.006,
+      bevelSize: 0.006,
+      bevelSegments: 2,
+    })
+
+    for (const side of [-1, 1] as const) {
       const x = side * 1.38
       const rim = new THREE.Mesh(rimGeo, fMat)
       rim.position.set(x, 0, 0)
@@ -277,27 +448,31 @@ export class Glasses3DViewer {
       this.glassesGroup.add(glass)
 
       const hud = new THREE.Mesh(lGeo, this.hudMat)
-      hud.position.set(x, 0, -0.016)
+      hud.position.set(x, 0, -0.018)
       hud.rotation.y = Math.PI
       this.glassesGroup.add(hud)
 
-      const hinge = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.17, 0.2), this.sensorMat)
-      hinge.position.set(side * 2.58, 0.34, -0.05)
-      const bar = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.055, 1.5), this.sensorMat)
-      bar.position.set(side * 2.75, 0.31, -0.95)
-      const arm = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.14, 2.7), fMat)
-      arm.position.set(side * 2.7, 0.3, -1.42)
-      const pod = new THREE.Mesh(new THREE.CapsuleGeometry(0.18, 0.95, 8, 16), pMat)
-      pod.rotation.x = Math.PI / 2 + 0.18
-      pod.position.set(side * 2.72, 0.12, -2.85)
+      // Translucent nose pad nub peeking inside lower inner rim
+      const nosePad = new THREE.Mesh(new THREE.CapsuleGeometry(0.032, 0.13, 6, 10), padMat)
+      nosePad.position.set(side * 0.42, -0.16, -0.06)
+      nosePad.rotation.z = side * 0.35
+      this.glassesGroup.add(nosePad)
 
-      this.glassesGroup.add(hinge, bar, arm, pod)
-      this.templeTargets.push(hinge, bar, arm, pod)
+      // Outer lug & front metallic grey rectangular hinge accent
+      const lug = new THREE.Mesh(lugGeo, fMat)
+      lug.position.set(side * 2.52, 0.34, 0)
+      this.glassesGroup.add(lug)
+      this.templeTargets.push(lug)
+
+      const inlay = new THREE.Mesh(inlayGeo, this.sensorMat)
+      inlay.position.set(side * 2.56, 0.34, 0.068)
+      this.glassesGroup.add(inlay)
+      this.templeTargets.push(inlay)
     }
 
-    const bridge = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.16, 0.15), fMat)
-    bridge.position.set(0, 0.36, 0.01)
-    this.glassesGroup.add(bridge)
+    this.leftPivot = this.buildTempleMesh(-1, fMat, pMat)
+    this.rightPivot = this.buildTempleMesh(1, fMat, pMat)
+    this.glassesGroup.add(this.leftPivot, this.rightPivot)
   }
 
   private createHotspots(cb: GlassesCallbacks): void {
@@ -305,35 +480,40 @@ export class Glasses3DViewer {
       {
         label: '▲ Prev',
         hint: 'Right Temple Swipe Back: previous chat or older message',
-        localPos: new THREE.Vector3(-2.72, 0.56, -0.35),
+        anchor: this.leftPivot,
+        localPos: new THREE.Vector3(-0.18, 0.24, -0.45),
         kind: 'SCROLL',
         run: () => cb.onScroll(-1),
       },
       {
         label: '⚡ Tap',
         hint: 'Right Temple Tap: open thread, replies, or send',
-        localPos: new THREE.Vector3(-2.72, 0.28, -0.82),
+        anchor: this.leftPivot,
+        localPos: new THREE.Vector3(-0.18, 0.02, -0.95),
         kind: 'TAP',
         run: () => cb.onTap(),
       },
       {
         label: '▼ Next',
         hint: 'Right Temple Swipe Forward: next chat or newer message',
-        localPos: new THREE.Vector3(-2.72, -0.02, -1.25),
+        anchor: this.leftPivot,
+        localPos: new THREE.Vector3(-0.18, -0.22, -1.45),
         kind: 'SCROLL',
         run: () => cb.onScroll(1),
       },
       {
         label: '↩ Back',
         hint: 'Left Temple Double Tap: go back or cancel',
-        localPos: new THREE.Vector3(2.72, 0.48, -0.45),
+        anchor: this.rightPivot,
+        localPos: new THREE.Vector3(0.18, 0.22, -0.55),
         kind: 'BACK',
         run: () => cb.onBack?.(),
       },
       {
         label: '🎙 Voice',
         hint: 'Left Temple Hold: record & send Telegram voice note',
-        localPos: new THREE.Vector3(2.72, 0.06, -1.05),
+        anchor: this.rightPivot,
+        localPos: new THREE.Vector3(0.18, -0.14, -1.15),
         kind: 'HOLD',
         run: () => cb.onHold(),
       },
@@ -344,13 +524,16 @@ export class Glasses3DViewer {
       btn.title = def.hint
       btn.textContent = def.label
       btn.style.cssText =
-        'position:absolute;transform:translate(-50%,-50%);pointer-events:auto;padding:4px 9px;border-radius:999px;border:1px solid rgba(74,222,128,0.55);background:rgba(5,16,12,0.84);color:#ecfdf5;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif;font-size:10.5px;font-weight:700;cursor:pointer;white-space:nowrap;box-shadow:0 4px 14px rgba(0,0,0,0.45);'
+        'position:absolute;transform:translate(-50%,-50%);pointer-events:auto;padding:4px 9px;border-radius:999px;border:1px solid rgba(74,222,128,0.55);background:rgba(5,16,12,0.84);color:#ecfdf5;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif;font-size:10.5px;font-weight:700;cursor:pointer;white-space:nowrap;box-shadow:0 4px 14px rgba(0,0,0,0.45);transition:opacity 0.2s;'
       btn.onpointerenter = () => {
         this.badgeEl.textContent = def.hint.toUpperCase().slice(0, 56)
       }
       btn.onclick = (e) => {
         e.stopPropagation()
-        this.pulseAt(def.localPos)
+        const wp = def.localPos.clone()
+        def.anchor.localToWorld(wp)
+        this.glassesGroup.worldToLocal(wp)
+        this.pulseAt(wp)
         this.triggerGesture(def.kind)
         def.run()
       }
@@ -360,7 +543,7 @@ export class Glasses3DViewer {
   }
 
   private pulseAt(pos: THREE.Vector3): void {
-    this.pulseRing.position.set(pos.x < 0 ? -2.79 : 2.79, pos.y, pos.z)
+    this.pulseRing.position.copy(pos)
     this.pulseRing.scale.setScalar(0.6)
     this.pulseMat.opacity = 0.95
   }
@@ -370,6 +553,15 @@ export class Glasses3DViewer {
     this.pointer.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1)
     this.raycaster.setFromCamera(this.pointer, this.camera)
     return this.raycaster.intersectObjects(this.templeTargets, false).length > 0
+  }
+
+  private zoomBy(delta: number): void {
+    this.cameraAnimating = false
+    this.zoomOffset.copy(this.camera.position).sub(this.controls.target)
+    const dist = this.zoomOffset.length()
+    const nextDist = THREE.MathUtils.clamp(dist + delta, this.controls.minDistance, this.controls.maxDistance)
+    this.zoomOffset.setLength(nextDist)
+    this.camera.position.copy(this.controls.target).add(this.zoomOffset)
   }
 
   private bindInputs(cb: GlassesCallbacks): void {
@@ -386,7 +578,7 @@ export class Glasses3DViewer {
       this.holdFired = false
       this.holdTimer = window.setTimeout(() => {
         this.holdFired = true
-        this.pulseAt(new THREE.Vector3(2.72, 0.25, -0.95))
+        this.targetFold = 0
         this.triggerGesture('HOLD')
         cb.onHold()
       }, 450)
@@ -396,8 +588,7 @@ export class Glasses3DViewer {
         clearTimeout(this.holdTimer)
         this.holdTimer = null
       }
-      if (!this.holdFired && this.hitTemple(e)) {
-        this.pulseAt(new THREE.Vector3(-2.72, 0.31, -0.82))
+      if (!this.holdFired && this.hitTemple(e) && this.foldProgress < 0.4) {
         this.triggerGesture('TAP')
         cb.onTap()
       }
@@ -405,15 +596,37 @@ export class Glasses3DViewer {
     el.addEventListener(
       'wheel',
       (e) => {
-        if (!this.hitTemple(e) || Math.abs(e.deltaY) < 4) return
+        if (this.foldProgress > 0.4 || !this.hitTemple(e) || Math.abs(e.deltaY) < 4) return
         e.preventDefault()
         e.stopImmediatePropagation()
-        this.pulseAt(new THREE.Vector3(-2.72, 0.31, -0.82))
         this.triggerGesture('SCROLL')
         cb.onScroll(e.deltaY > 0 ? 1 : -1)
       },
       { passive: false, capture: true }
     )
+
+    // Smooth keyboard zoom (+ / - keys work on both RU and EN keyboard layouts) & F to fold/unfold
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'Equal' || e.code === 'NumpadAdd') {
+        e.preventDefault()
+        this.zoomKeyDir = -1
+      } else if (e.code === 'Minus' || e.code === 'NumpadSubtract') {
+        e.preventDefault()
+        this.zoomKeyDir = 1
+      } else if (e.code === 'KeyF') {
+        this.targetFold = this.targetFold > 0.5 ? 0 : 1
+      }
+    })
+    window.addEventListener('keyup', (e) => {
+      if (
+        e.code === 'Equal' ||
+        e.code === 'NumpadAdd' ||
+        e.code === 'Minus' ||
+        e.code === 'NumpadSubtract'
+      ) {
+        this.zoomKeyDir = 0
+      }
+    })
   }
 
   public cycleTheme(): void {
@@ -431,17 +644,20 @@ export class Glasses3DViewer {
   public toggleView(): void {
     this.viewIdx = (this.viewIdx + 1) % 3
     if (this.viewIdx === 0) {
-      this.viewBtn.textContent = '🔍 Close-Up [V]'
-      this.desiredTarget.set(0, 0.02, 0.1)
-      this.desiredCamPos.set(0, 0.16, -4.65)
+      this.viewBtn.textContent = '👁 Wearer POV [V]'
+      this.targetFold = 1
+      this.desiredTarget.set(0, -0.04, -0.1)
+      this.desiredCamPos.set(0, 0.04, 6.25)
     } else if (this.viewIdx === 1) {
-      this.viewBtn.textContent = '🕶 3D Front [V]'
+      this.viewBtn.textContent = '🔍 Close-Up [V]'
+      this.targetFold = 0
+      this.desiredTarget.set(0, 0.02, 0.1)
+      this.desiredCamPos.set(0, 0.15, -4.65)
+    } else {
+      this.viewBtn.textContent = '🕶 Folded Hero [V]'
+      this.targetFold = 0
       this.desiredTarget.set(-1.38, 0.02, 0.15)
       this.desiredCamPos.set(-1.38, 0.04, -2.25)
-    } else {
-      this.viewBtn.textContent = '👁 Wearer POV [V]'
-      this.desiredTarget.set(0, 0, -0.5)
-      this.desiredCamPos.set(2.05, 0.52, 5.1)
     }
     this.cameraAnimating = true
   }
@@ -537,11 +753,18 @@ export class Glasses3DViewer {
 
   private updateHotspots(): void {
     if (!this.showPins) return
+    const openAlpha = THREE.MathUtils.smoothstep(1 - this.foldProgress, 0.55, 0.95)
     const w = this.domElement.clientWidth || 580
-    const h = this.domElement.clientHeight || 345
+    const h = this.domElement.clientHeight || 350
+
     for (const { def, el } of this.hotspotEls) {
+      if (openAlpha < 0.05) {
+        el.style.opacity = '0'
+        el.style.pointerEvents = 'none'
+        continue
+      }
       this.projVec.copy(def.localPos)
-      this.glassesGroup.localToWorld(this.projVec)
+      def.anchor.localToWorld(this.projVec)
       this.projVec.project(this.camera)
       if (this.projVec.z > 1) {
         el.style.opacity = '0'
@@ -550,7 +773,7 @@ export class Glasses3DViewer {
       }
       el.style.left = `${Math.max(46, Math.min(w - 46, (this.projVec.x * 0.5 + 0.5) * w))}px`
       el.style.top = `${Math.max(48, Math.min(h - 36, (-this.projVec.y * 0.5 + 0.5) * h))}px`
-      el.style.opacity = '1'
+      el.style.opacity = String(openAlpha)
       el.style.pointerEvents = 'auto'
     }
   }
@@ -560,6 +783,17 @@ export class Glasses3DViewer {
     const now = performance.now()
     const flashing = now < this.flashUntil
     const theme = HUD_THEMES[this.themeIdx]
+
+    // Smooth temple fold/unfold hinge animation
+    this.foldProgress += (this.targetFold - this.foldProgress) * 0.085
+    if (Math.abs(this.targetFold - this.foldProgress) < 0.001) this.foldProgress = this.targetFold
+    this.rightPivot.rotation.y = this.foldProgress * 1.49
+    this.leftPivot.rotation.y = -this.foldProgress * 1.42
+
+    // Continuous buttery keyboard zoom (+ / -)
+    if (this.zoomKeyDir !== 0) {
+      this.zoomBy(this.zoomKeyDir * 0.08)
+    }
 
     if (this.cameraAnimating) {
       this.camera.position.lerp(this.desiredCamPos, 0.1)
@@ -571,9 +805,10 @@ export class Glasses3DViewer {
       }
     }
 
+    // Directional optical waveguide fade: visible only when looking from behind lenses (-Z)
     this.camera.getWorldDirection(this.camDir)
-    const alpha = THREE.MathUtils.smoothstep(this.camDir.z, 0.08, 0.52)
-    this.hudMat.opacity = alpha * 0.98
+    const behindAlpha = THREE.MathUtils.smoothstep(this.camDir.z, 0.08, 0.52)
+    this.hudMat.opacity = behindAlpha * 0.98
 
     if (this.pulseMat.opacity > 0.01) {
       this.pulseRing.scale.multiplyScalar(1.06)
@@ -588,19 +823,21 @@ export class Glasses3DViewer {
       : flashing
       ? 1.7
       : this.hoveringTemple
-      ? 0.8
-      : 0.25
+      ? 0.65
+      : 0.14
 
     if (!flashing && !this.isRecording) {
-      this.badgeEl.textContent =
-        alpha > 0.35
-          ? `WEARER POV • ${theme.name.toUpperCase()} WAVEGUIDE`
-          : 'FRONT VIEW • ZERO LIGHT LEAK (ORBIT BEHIND)'
-      this.badgeEl.style.color = alpha > 0.35 ? theme.css : '#94a3b8'
+      if (behindAlpha > 0.35) {
+        this.badgeEl.textContent = `WEARER POV • ${theme.name.toUpperCase()} WAVEGUIDE`
+        this.badgeEl.style.color = theme.css
+      } else if (this.foldProgress > 0.6) {
+        this.badgeEl.textContent = 'EVEN G2 FOLDED • DRAG TO UNFOLD & ORBIT'
+        this.badgeEl.style.color = '#94a3b8'
+      } else {
+        this.badgeEl.textContent = 'FRONT VIEW • ZERO LIGHT LEAK (ORBIT BEHIND)'
+        this.badgeEl.style.color = '#94a3b8'
+      }
     }
-
-    this.glassesGroup.position.y =
-      this.viewIdx === 2 && !this.cameraAnimating ? Math.sin(now * 0.0016) * 0.03 : 0
 
     this.controls.update()
     this.updateHotspots()
