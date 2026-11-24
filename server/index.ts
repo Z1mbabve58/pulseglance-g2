@@ -103,17 +103,8 @@ async function processVoiceReply(
             {
               role: 'user',
               content: [
-                {
-                  type: 'text',
-                  text: `Chat: "${chatTitle}". ${languageInstruction}`,
-                },
-                {
-                  type: 'input_audio',
-                  input_audio: {
-                    data: audioBase64,
-                    format: 'wav',
-                  },
-                },
+                { type: 'text', text: `Chat: "${chatTitle}". ${languageInstruction}` },
+                { type: 'input_audio', input_audio: { data: audioBase64, format: 'wav' } },
               ],
             },
           ],
@@ -170,10 +161,7 @@ async function processVoiceReply(
     return { transcript: hintClean, reply: hintClean.slice(0, 120) }
   }
 
-  return {
-    transcript: 'Голосовое подтверждение',
-    reply: 'Got it, will follow up shortly!',
-  }
+  return { transcript: 'Голосовое подтверждение', reply: 'Got it, will follow up shortly!' }
 }
 
 const app = express()
@@ -182,44 +170,45 @@ app.use(express.json({ limit: '15mb' }))
 
 app.get('/api/digest', async (_req, res) => {
   try {
-    const dialogs = await client.getDialogs({ limit: 150 })
-    const valid = dialogs.filter((d) => d.title && d.message?.message)
+    const dialogs = await client.getDialogs({ limit: 200 })
+    const valid = dialogs.filter((d) => d.title && d.message)
 
-    const humanDms = valid
-      .filter((d) => d.isUser && !(d.entity as any)?.bot)
-      .slice(0, 5)
+    const isHumanDm = (d: any) =>
+      Boolean((d.isUser || d.entity?.className === 'User') && !d.entity?.bot)
 
-    const groupsAndChannels = valid
-      .filter((d) => !d.isUser || Boolean((d.entity as any)?.bot))
-      .slice(0, 4)
-
+    const humanDms = valid.filter(isHumanDm).slice(0, 20)
+    const groupsAndChannels = valid.filter((d) => !isHumanDm(d)).slice(0, 5)
     const selected = [...humanDms, ...groupsAndChannels]
 
-    const cards = []
-    for (const d of selected) {
-      const id = String(d.id)
-      if (d.entity) dialogEntities.set(id, d.entity)
+    const cards = await Promise.all(
+      selected.map(async (d) => {
+        const id = String(d.id)
+        if (d.entity) dialogEntities.set(id, d.entity)
 
-      const msgs = await client.getMessages(d.entity || d.id, { limit: 4 })
-      const textBlock = msgs
-        .reverse()
-        .map((m) => (m.message || '').trim())
-        .filter(Boolean)
-        .join('\n')
+        const msgs = await client.getMessages(d.entity || d.id, { limit: 6 })
+        const textLines = msgs
+          .reverse()
+          .map((m) => (m.message || '').trim())
+          .filter(Boolean)
 
-      if (!textBlock) continue
-      const ai = await summarizeAndDraft(d.title || 'Chat', textBlock)
-      const isDirectPerson = Boolean(d.isUser && !(d.entity as any)?.bot)
-      cards.push({
-        id,
-        title: d.title || 'Chat',
-        isUser: isDirectPerson,
-        unreadCount: d.unreadCount || 0,
-        summary: ai.summary,
-        replies: ai.replies,
+        const textBlock =
+          textLines.length > 0
+            ? textLines.join('\n')
+            : '[Media, voice note, sticker, or call]'
+
+        const ai = await summarizeAndDraft(d.title || 'Chat', textBlock)
+        return {
+          id,
+          title: d.title || 'Chat',
+          isUser: isHumanDm(d),
+          unreadCount: d.unreadCount || 0,
+          summary: ai.summary,
+          replies: ai.replies,
+        }
       })
-    }
+    )
 
+    console.log(`Synced ${humanDms.length} DMs and ${groupsAndChannels.length} groups/channels`)
     res.json({ ok: true, cards })
   } catch (err: any) {
     console.error('Digest error:', err)
