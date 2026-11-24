@@ -14,6 +14,7 @@ interface ChatCard {
   isUser?: boolean
   unreadCount: number
   summary: string
+  fullDigest?: string
   replies: string[]
 }
 
@@ -60,7 +61,7 @@ function formatBadge(count: number): string {
   return count > 99 ? ' (99+)' : ` (${count})`
 }
 
-function wrapText(text: string, maxLen = 46, maxLines = 3): string {
+function wrapText(text: string, maxLen = 48, maxLines = 4): string {
   const words = text.replace(/\s+/g, ' ').trim().split(' ')
   const lines: string[] = []
   let current = ''
@@ -73,7 +74,10 @@ function wrapText(text: string, maxLen = 46, maxLines = 3): string {
     }
   }
   if (current) lines.push(current)
-  return lines.slice(0, maxLines).join('\n')
+  if (lines.length <= maxLines) return lines.join('\n');
+  const trimmed = lines.slice(0, maxLines);
+  trimmed[maxLines - 1] = trimmed[maxLines - 1].replace(/\s+\S*$/, '') + '…';
+  return trimmed.join('\n')
 }
 
 function encodeWavBase64(chunks: Uint8Array[], sampleRate = 16000): string {
@@ -152,7 +156,7 @@ function buildScreenText(): string {
 
   const tag = card.isUser ? 'DM' : 'CH'
   const header = `[${chatIdx + 1}/${list.length} ${tag}] ${card.title.slice(0, 21)}${formatBadge(card.unreadCount)}`
-  const body = wrapText(card.summary, 46, 3)
+  const body = wrapText(card.summary, 48, 4)
   return `${header}\n${body}\n[Scroll] Next [Click] Reply [Hold] Voice`
 }
 
@@ -229,7 +233,7 @@ function renderCompanion(): void {
                   <span>ACTIVE CHAT: <strong style="color:#ecfdf5;">${escapeHtml(card.title)}${formatBadge(card.unreadCount)}</strong></span>
                   <span style="opacity:0.7;">AI Digest</span>
                 </div>
-                <div style="background:#0b1711;padding:12px;border-radius:10px;border:1px solid #193527;font-size:12.5px;line-height:1.5;color:#d1fae5;">${escapeHtml(card.summary)}</div>
+                <div style="background:#0b1711;padding:12px;border-radius:10px;border:1px solid #193527;font-size:12.5px;line-height:1.5;color:#d1fae5;">${escapeHtml(card.fullDigest || card.summary)}</div>
               </div>
               <div style="margin-bottom:14px;">
                 <div style="font-size:11px;color:#6ee7b7;margin-bottom:6px;">SMART & VOICE REPLIES (Click to select, Enter to send):</div>

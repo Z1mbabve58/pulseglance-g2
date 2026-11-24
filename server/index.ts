@@ -18,14 +18,24 @@ const client = new TelegramClient(new sessions.StringSession(savedSession), apiI
 
 const dialogEntities = new Map<string, any>()
 
+function trimAtWord(str: string, maxLen: number): string {
+  const clean = str.replace(/\s+/g, ' ').trim()
+  if (clean.length <= maxLen) return clean
+  const sliced = clean.slice(0, maxLen - 1)
+  const lastSpace = sliced.lastIndexOf(' ')
+  return (lastSpace > maxLen * 0.5 ? sliced.slice(0, lastSpace) : sliced) + '…'
+}
+
 function parseJsonBlock(raw: string): any {
   const cleaned = raw.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim()
   return JSON.parse(cleaned)
 }
 
-async function summarizeAndDraft(chatTitle: string, messagesText: string) {
+async function summarizeAndDraft(chatTitle: string, messagesText: string, latestText: string) {
+  const cleanLatest = latestText.replace(/\s+/g, ' ').trim()
   const fallback = {
-    summary: messagesText.slice(0, 120).replace(/\n+/g, ' '),
+    summary: trimAtWord(cleanLatest, 155),
+    fullDigest: trimAtWord(cleanLatest, 360),
     replies: ['Ок, принял!', 'Сейчас посмотрю', 'На связи, скоро отвечу'],
   }
   if (!openrouterKey) return fallback
@@ -43,19 +53,23 @@ async function summarizeAndDraft(chatTitle: string, messagesText: string) {
           {
             role: 'system',
             content:
-              'You summarize Telegram messages for Even G2 smart glasses (576x288 HUD). Return ONLY valid JSON: {"summary":"max 115 chars concise summary in the chat language","replies":["reply 1 max 42 chars","reply 2 max 42 chars","reply 3 max 42 chars"]}.',
+              'You summarize the NEWEST Telegram messages for Even G2 smart glasses. Messages are ordered oldest to newest and labeled with sender ("Я" = user, otherwise contact name). Focus primarily on the LATEST message(s), especially what the contact wrote. Never cut words mid-way. Return ONLY valid JSON: {"hudSummary":"complete 1-2 short sentences max 150 chars in the language of the latest message","fullDigest":"complete full summary of the latest messages max 340 chars","replies":["complete reply 1 max 45 chars","complete reply 2 max 45 chars","complete reply 3 max 45 chars"]}.',
           },
-          { role: 'user', content: `Chat: ${chatTitle}\nRecent messages:\n${messagesText}` },
+          {
+            role: 'user',
+            content: `Chat: ${chatTitle}\nChronological messages (oldest -> newest):\n${messagesText}\n\nNewest message:\n${latestText}`,
+          },
         ],
-        temperature: 0.3,
+        temperature: 0.25,
       }),
     })
     const data: any = await res.json()
     const parsed = parseJsonBlock(data?.choices?.[0]?.message?.content || '')
-    if (parsed?.summary && Array.isArray(parsed?.replies) && parsed.replies.length > 0) {
+    if (parsed?.hudSummary && Array.isArray(parsed?.replies) && parsed.replies.length > 0) {
       return {
-        summary: String(parsed.summary).slice(0, 130),
-        replies: parsed.replies.slice(0, 3).map((r: any) => String(r).slice(0, 55)),
+        summary: trimAtWord(String(parsed.hudSummary), 165),
+        fullDigest: trimAtWord(String(parsed.fullDigest || parsed.hudSummary), 380),
+        replies: parsed.replies.slice(0, 3).map((r: any) => trimAtWord(String(r), 55)),
       }
     }
   } catch (err) {
@@ -95,7 +109,7 @@ async function processVoiceReply(chatTitle: string, summary: string, audioBase64
       const data: any = await res.json()
       const parsed = parseJsonBlock(data?.choices?.[0]?.message?.content || '')
       if (parsed?.reply) {
-        return { transcript: String(parsed.transcript || parsed.reply), reply: String(parsed.reply).slice(0, 120) }
+        return { transcript: String(parsed.transcript || parsed.reply), reply: trimAtWord(String(parsed.reply), 120) }
       }
     } catch (err) {
       console.error('AI audio error:', err)
@@ -122,11 +136,11 @@ async function processVoiceReply(chatTitle: string, summary: string, audioBase64
       })
       const data: any = await res.json()
       const polished = data?.choices?.[0]?.message?.content?.trim()
-      if (polished) return { transcript: hintClean, reply: polished.slice(0, 120) }
+      if (polished) return { transcript: hintClean, reply: trimAtWord(polished, 120) }
     } catch (err) {
       console.error('AI text error:', err)
     }
-    return { transcript: hintClean, reply: hintClean.slice(0, 120) }
+    return { transcript: hintClean, reply: trimAtWord(hintClean, 120) }
   }
 
   return { transcript: 'Голосовое подтверждение', reply: 'Got it, will follow up shortly!' }
@@ -146,19 +160,21 @@ app.get('/api/digest', async (_req, res) => {
     const isHumanDm = (d: any) =>
       Boolean((d.isUser || d.entity?.className === 'User') && !d.entity?.bot && isMainFolder(d))
 
+    const sortByUnreadAndNewest = (a: any, b: any) => {
+      const unreadDiff = (b.unreadCount > 0 ? 1 : 0) - (a.unreadCount > 0 ? 1 : 0)
+      if (unreadDiff !== 0) return unreadDiff
+      return (b.date || 0) - (a.date || 0)
+    }
+
     const humanDms = dialogs
       .filter((d) => isHumanDm(d) && d.message)
-      .sort((a, b) => (b.unreadCount || 0) - (a.unreadCount || 0))
+      .sort(sortByUnreadAndNewest)
       .slice(0, 15)
 
     const groups = dialogs
       .filter((d) => !isHumanDm(d) && isMainFolder(d) && d.message)
+      .sort(sortByUnreadAndNewest)
       .slice(0, 4)
-
-    console.log(
-      `[SYNC] DMs (${humanDms.length}):`,
-      humanDms.map((d) => `${getTitle(d)} [unread:${d.unreadCount || 0}]`).join(' | ')
-    )
 
     const cards = []
     for (const d of [...humanDms, ...groups]) {
@@ -167,14 +183,28 @@ app.get('/api/digest', async (_req, res) => {
         const title = getTitle(d)
         if (d.entity) dialogEntities.set(id, d.entity)
 
-        const msgs = await client.getMessages(d.entity || d.id, { limit: 5 })
-        const textLines = msgs
-          .reverse()
-          .map((m) => (m.message || '').trim())
+        const fetched = await client.getMessages(d.inputEntity || d.entity || d.id, { limit: 6 })
+        const allMsgs = [...fetched]
+        if (d.message && !allMsgs.some((m) => m.id === d.message?.id)) {
+          allMsgs.push(d.message)
+        }
+        allMsgs.sort((a: any, b: any) => (a.date || 0) - (b.date || 0))
+
+        const formattedLines = allMsgs
+          .map((m: any) => {
+            const txt = (m.message || '').trim()
+            if (!txt) return ''
+            const sender = m.out ? 'Я' : title
+            return `${sender}: ${txt}`
+          })
           .filter(Boolean)
 
-        const textBlock = textLines.length > 0 ? textLines.join('\n') : '[Media / Voice / Sticker]'
-        const ai = await summarizeAndDraft(title, textBlock)
+        const latestLine =
+          formattedLines[formattedLines.length - 1] ||
+          (d.message?.message ? `${d.message.out ? 'Я' : title}: ${d.message.message}` : '[Media / Voice]')
+
+        const textBlock = formattedLines.length > 0 ? formattedLines.join('\n') : latestLine
+        const ai = await summarizeAndDraft(title, textBlock, latestLine)
 
         cards.push({
           id,
@@ -182,6 +212,7 @@ app.get('/api/digest', async (_req, res) => {
           isUser: isHumanDm(d),
           unreadCount: d.unreadCount || 0,
           summary: ai.summary,
+          fullDigest: ai.fullDigest,
           replies: ai.replies,
         })
       } catch (itemErr) {
