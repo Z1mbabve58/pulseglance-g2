@@ -258,6 +258,7 @@ function ensureGlasses3D(): Glasses3DViewer {
       if (mode === 'RECORDING') void finishVoiceRecording(true)
       else void startVoiceRecording()
     },
+    onBack: () => { if (mode === "RECORDING") void cancelVoiceRecording(); else if (mode === "REPLY") { mode = "HISTORY"; void render(); } else if (mode === "HISTORY" || mode === "MEDIA") { mode = "FEED"; void render(); } },
   })
   return glasses3d
 }
