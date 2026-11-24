@@ -45,7 +45,7 @@ function escapeHtml(str: string): string {
 function getVisibleCards(): ChatCard[] {
   if (!dmOnly) return cards
   const dms = cards.filter((c) => c.isUser)
-  return dms.length > 0 ? dms : cards
+  return dms
 }
 
 function getActiveCard(): ChatCard | undefined {
