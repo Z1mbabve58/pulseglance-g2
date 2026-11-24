@@ -7,6 +7,7 @@ import {
   AudioInputSource,
 } from '@evenrealities/even_hub_sdk'
 import type { EvenHubEvent } from '@evenrealities/even_hub_sdk'
+import { Glasses3DViewer } from './glasses3d'
 
 interface ChatMessage {
   id?: number
@@ -225,6 +226,42 @@ function buildScreenText(): string {
   return `[${tag} ${chatIdx + 1}/${list.length}] ${card.title.slice(0, 18)}${formatBadge(card.unreadCount)}${attBadge}\n${wrapText(card.summary, 48, 4)}\n[Scroll] Chat [Click] Thread [M] Media`
 }
 
+let glasses3d: Glasses3DViewer | null = null
+
+function ensureGlasses3D(): Glasses3DViewer {
+  if (glasses3d) return glasses3d
+  glasses3d = new Glasses3DViewer({
+    onTap: () => {
+      if (mode === 'RECORDING') void finishVoiceRecording(true)
+      else if (mode === 'FEED') { resetChatCursor(); mode = 'HISTORY'; void render() }
+      else if (mode === 'HISTORY') { replyIdx = 0; mode = 'REPLY'; void render() }
+      else if (mode === 'MEDIA') openSelectedAttachment()
+      else if (mode === 'REPLY') void sendSelectedReply()
+    },
+    onScroll: (dir) => {
+      const list = getVisibleCards()
+      const active = getActiveCard()
+      if (mode === 'FEED' && list.length) {
+        chatIdx = (chatIdx + dir + list.length) % list.length
+        resetChatCursor(); void render()
+      } else if (mode === 'HISTORY') {
+        scrollHistory(dir)
+      } else if (mode === 'MEDIA') {
+        const a = getChatAttachments(active)
+        if (a.length) { mediaIdx = (mediaIdx + dir + a.length) % a.length; void render() }
+      } else if (mode === 'REPLY' && active) {
+        const l = active.replies.length || 1
+        replyIdx = (replyIdx + dir + l) % l; void render()
+      }
+    },
+    onHold: () => {
+      if (mode === 'RECORDING') void finishVoiceRecording(true)
+      else void startVoiceRecording()
+    },
+  })
+  return glasses3d
+}
+
 function renderCompanion(): void {
   const root = document.getElementById('app')
   if (!root) return
@@ -294,15 +331,7 @@ function renderCompanion(): void {
           <button id="tab-groups" style="padding:8px;border-radius:9px;border:1px solid ${activeTab === 'GROUPS' ? '#34d399' : 'transparent'};background:${activeTab === 'GROUPS' ? '#133826' : 'transparent'};color:${activeTab === 'GROUPS' ? '#ecfdf5' : '#6ee7b7'};font-family:inherit;font-size:12px;font-weight:700;cursor:pointer;">👥 Groups Only (${grpCount})</button>
         </div>
 
-        <div style="padding:12px;border-radius:16px;background:#0e1612;border:1px solid #2b3f35;margin-bottom:12px;">
-          <div style="display:flex;justify-content:space-between;font-size:10px;color:#6ee7b7;opacity:0.65;margin-bottom:6px;">
-            <span>EVEN G2 WAVEGUIDE DISPLAY • 576×288</span>
-            <span>${card ? `${activeTab} • ${chatIdx + 1}/${list.length}` : 'EMPTY TAB'}</span>
-          </div>
-          <div style="background:#040d08;border:1px solid #1d4d35;border-radius:12px;padding:15px;min-height:132px;display:flex;align-items:center;">
-            <pre style="margin:0;width:100%;font-family:'SF Mono',Menlo,monospace;font-size:13px;line-height:1.5;color:#4ade80;text-shadow:0 0 10px rgba(74,222,128,0.5);white-space:pre-wrap;">${esc(buildScreenText())}</pre>
-          </div>
-        </div>
+        <div id="g2-3d-mount" style="margin-bottom:12px;"></div>
 
         ${isRec ? `
         <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:8px;margin-bottom:14px;">
@@ -338,6 +367,13 @@ function renderCompanion(): void {
         </div>
       </div>
     </div>`
+
+  const mount3d = document.getElementById('g2-3d-mount')
+  const viewer = ensureGlasses3D()
+  viewer.updateScreen(buildScreenText(), mode === 'RECORDING')
+  if (mount3d && viewer.domElement.parentElement !== mount3d) {
+    mount3d.appendChild(viewer.domElement)
+  }
 
   const threadBox = document.getElementById('thread-box')
   const activeEl = threadBox?.querySelector('.hud-active-msg') as HTMLElement | null
@@ -552,9 +588,9 @@ window.addEventListener('keydown', (e) => {
     if (lightboxUrl) { e.preventDefault(); lightboxUrl = ''; renderCompanion(); return }
     if (mode === 'RECORDING') { e.preventDefault(); void cancelVoiceRecording(); return }
   }
-  if (e.key === 'Tab') { e.preventDefault(); activeTab = activeTab === 'DMS' ? 'GROUPS' : 'DMS'; chatIdx = 0; resetChatCursor(); mode = 'FEED'; void render() }
-  else if (e.key === 'ArrowRight' && list.length) { chatIdx = (chatIdx + 1) % list.length; resetChatCursor(); mode = 'FEED'; void render() }
-  else if (e.key === 'ArrowLeft' && list.length) { chatIdx = (chatIdx - 1 + list.length) % list.length; resetChatCursor(); mode = 'FEED'; void render() }
+  if (e.key === 'Tab') { e.preventDefault(); glasses3d?.triggerGesture('SCROLL'); activeTab = activeTab === 'DMS' ? 'GROUPS' : 'DMS'; chatIdx = 0; resetChatCursor(); mode = 'FEED'; void render() }
+  else if (e.key === 'ArrowRight' && list.length) { glasses3d?.triggerGesture('SCROLL'); chatIdx = (chatIdx + 1) % list.length; resetChatCursor(); mode = 'FEED'; void render() }
+  else if (e.key === 'ArrowLeft' && list.length) { glasses3d?.triggerGesture('SCROLL'); chatIdx = (chatIdx - 1 + list.length) % list.length; resetChatCursor(); mode = 'FEED'; void render() }
   else if (e.key === 'ArrowUp') {
     e.preventDefault()
     if (mode === 'REPLY' && active) { const l = active.replies.length || 1; replyIdx = (replyIdx - 1 + l) % l; void render() }
@@ -567,9 +603,9 @@ window.addEventListener('keydown', (e) => {
     else scrollHistory(1)
   } else if (e.key.toLowerCase() === 'm') { mode = mode === 'MEDIA' ? 'FEED' : 'MEDIA'; mediaIdx = 0; void render() }
   else if (e.key.toLowerCase() === 'o') { openSelectedAttachment() }
-  else if (e.code === 'Space') { e.preventDefault(); if (mode === 'RECORDING') void finishVoiceRecording(true); else void startVoiceRecording() }
+  else if (e.code === 'Space') { e.preventDefault(); glasses3d?.triggerGesture('HOLD'); if (mode === 'RECORDING') void finishVoiceRecording(true); else void startVoiceRecording() }
   else if (e.key === 'Enter') {
-    e.preventDefault()
+    e.preventDefault(); glasses3d?.triggerGesture('TAP');
     if (mode === 'RECORDING') void finishVoiceRecording(true)
     else if (mode === 'MEDIA') openSelectedAttachment()
     else void sendSelectedReply()
