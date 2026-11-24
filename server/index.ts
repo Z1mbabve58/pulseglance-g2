@@ -142,8 +142,9 @@ app.get('/api/digest', async (_req, res) => {
     const getTitle = (d: any) =>
       (d.title || d.entity?.firstName || d.entity?.username || 'Direct Message').trim()
 
+    const isMainFolder = (d: any) => !d.archived && d.folderId !== 1
     const isHumanDm = (d: any) =>
-      Boolean((d.isUser || d.entity?.className === 'User') && !d.entity?.bot)
+      Boolean((d.isUser || d.entity?.className === 'User') && !d.entity?.bot && isMainFolder(d))
 
     const humanDms = dialogs
       .filter((d) => isHumanDm(d) && d.message)
@@ -151,12 +152,12 @@ app.get('/api/digest', async (_req, res) => {
       .slice(0, 15)
 
     const groups = dialogs
-      .filter((d) => !isHumanDm(d) && d.message)
+      .filter((d) => !isHumanDm(d) && isMainFolder(d) && d.message)
       .slice(0, 4)
 
     console.log(
-      'DMs found:',
-      humanDms.map((d) => `${getTitle(d)} (unread: ${d.unreadCount || 0})`).join(', ')
+      `[SYNC] DMs (${humanDms.length}):`,
+      humanDms.map((d) => `${getTitle(d)} [unread:${d.unreadCount || 0}]`).join(' | ')
     )
 
     const cards = []
